@@ -216,7 +216,7 @@ def create_calendar_event(
                 raise
 
         # Extract details
-        meet_link = created_event.get('hangoutLink', 'No Meet link (add manually in Google Calendar)')
+        meet_link = created_event.get('hangoutLink', '')  # Empty string if no Meet link
         calendar_link = created_event.get('htmlLink', '')
 
         event = {
@@ -226,9 +226,9 @@ def create_calendar_event(
             "duration_minutes": duration_minutes,
             "attendees": attendee_list,
             "description": description or "Created by MeetingMind",
-            "meeting_link": meet_link,
+            "meeting_link": meet_link if meet_link else None,  # None if no Meet link (easier to check)
             "calendar_link": calendar_link,
-            "status": "✅ REAL Calendar Event Created",
+            "status": "✅ Calendar Event Created",
             "timezone": DEFAULT_TIMEZONE,
             "real_event": True,
             "invites_sent": False,  # Service accounts cannot invite even with shared calendar

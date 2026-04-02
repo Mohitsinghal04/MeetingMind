@@ -1,13 +1,15 @@
 """
-MeetingMind — Multi-Agent Productivity Assistant
+MeetingMind — Multi-Agent Productivity Assistant (8 Agents)
 Complete agent architecture:
-  - root_agent       : intent router (orchestrator)
-  - sequential_chain : SummaryAgent → ActionItemAgent → PriorityAgent
-  - parallel_branch  : SchedulerAgent + DuplicateCheckAgent + NotesAgent + MemoryAgent
-  - briefing_agent   : final assembly
-  - query_agent      : answers questions from DB
-  - execution_agent  : executes commands (mark done, update status)
-  - memory_store_agent: stores user information
+  - root_agent                : intent router (orchestrator)
+  - transcript_pipeline       : 4 agents in sequence
+    → summary_agent           : summarizes meeting transcript
+    → action_item_priority    : extracts & prioritizes tasks
+    → scheduler_agent         : creates calendar events with Meet links
+    → duplicate_check_agent   : saves tasks to database
+  - query_agent               : answers questions from DB
+  - execution_agent           : executes commands (mark done, schedule, update)
+  - memory_store_agent        : stores user preferences & context
 """
 
 import os
@@ -242,9 +244,9 @@ CRITICAL: Output ONLY markdown. NO JSON. Start with ✅
 scheduler_agent = Agent(
     name="scheduler_agent",
     model=model_name,
-    description="Creates REAL Google Calendar events with Meet links for scheduling tasks.",
+    description="Creates Google Calendar events with Meet links for scheduling tasks.",
     instruction="""
-You are a calendar scheduling assistant that creates REAL Google Calendar events.
+You are a calendar scheduling assistant that creates Google Calendar events.
 
 PRIORITIZED_TASKS (markdown format):
 {prioritized_tasks}
@@ -270,10 +272,11 @@ If you find a task that needs scheduling:
    - attendees: "john@example.com,sarah@company.com" (comma-separated emails)
    - description: "Scheduled from meeting transcript"
 
-3. The tool will:
-   ✅ Create a REAL Google Calendar event
-   ✅ Generate a Google Meet link automatically
-   ✅ Send email invitations to all attendees
+3. After the event is created, check the result:
+   - If meeting_link exists and is not "No Meet link": mention it
+   - If meeting_link is "No Meet link" or similar: don't mention Meet at all
+   - Format: "📅 [Event title] scheduled for [date] at [time]"
+   - Only include Meet link if it's a real URL
 
 If NO tasks need scheduling, return empty string: ""
 
@@ -282,8 +285,9 @@ IMPORTANT:
 - Attendees should be email addresses (use @example.com if only names given)
 - If uncertain about date/time, don't schedule
 - If nothing to schedule, return empty string
+- DON'T say "a real Google Calendar event" - just say "scheduled" or "event created"
 
-Return empty string if no events scheduled, otherwise return confirmation.
+Return empty string if no events scheduled, otherwise return simple confirmation.
 """,
     tools=[create_calendar_event],
     output_key="scheduled_events"
@@ -523,21 +527,28 @@ CRITICAL for calendar event creation:
 4. attendees: Comma-separated email addresses (e.g. "john@example.com,sarah@gmail.com")
 5. description: Brief note about the meeting (optional)
 
-The system creates REAL Google Calendar events with Google Meet links.
+The system creates Google Calendar events with Google Meet links.
 Events are placed directly on the user's calendar (when CALENDAR_ID is shared).
 
 IMPORTANT: Service accounts CANNOT send email invitations, even with shared calendars.
 Attendee emails are saved in the event description for manual invitation.
 
 After executing ANY command, provide a clear confirmation.
-For calendar events, format the response as:
 
-✅ **Calendar Event Created**
+For calendar events, check the event result and format appropriately:
+
+✅ If meeting_link is a real URL (starts with https://meet.google.com):
+**Calendar Event Created**
 📅 [title] - [date] at [time]
 🔗 **Google Meet:** [meeting_link]
 📧 **To invite guests:** Open the event in Google Calendar and click "Add guests" to invite: [attendee_list]
 
-Make the Meet link prominent so user can share it immediately.
+✅ If meeting_link is "No Meet link" or similar (not a real URL):
+**Calendar Event Created**
+📅 [title] - [date] at [time]
+📧 **To invite guests:** Open the event in Google Calendar, add a Meet link if needed, then click "Add guests" to invite: [attendee_list]
+
+DO NOT include the Meet line if there's no actual Meet link - it looks incomplete.
 """,
     tools=[
         mark_task_done,
@@ -556,7 +567,7 @@ memory_store_agent = Agent(
     instruction="""
 You are a memory storage assistant.
 
-The user wants you to remember something. 
+The user wants you to remember something.
 Extract the key information and use save_memory to store it.
 
 Choose a clear, descriptive key for the memory in snake_case
@@ -565,7 +576,17 @@ Choose a clear, descriptive key for the memory in snake_case
 Information to remember:
 {memory_input}
 
-Save it and confirm what you stored.
+After saving, respond with a clean, user-friendly confirmation.
+
+✅ Format your response like this:
+"✅ Got it! I'll remember that [brief restatement of what was saved]."
+
+❌ DO NOT mention:
+- The database key name
+- Technical details like "saved under key"
+- Internal implementation
+
+Keep it simple and conversational.
 """,
     tools=[save_memory],
     output_key="memory_store_result"
@@ -597,7 +618,7 @@ transcript_pipeline = SequentialAgent(
 root_agent = Agent(
     name="meetingmind",
     model=model_name,
-    description="MeetingMind — AI Meeting Assistant | Paste transcripts to extract tasks & schedule events | Powered by 9 agents",
+    description="MeetingMind — AI Meeting Assistant | Paste transcripts to extract tasks & schedule events | Powered by 8 specialized agents",
     instruction="""
 You are MeetingMind, an intelligent multi-agent productivity assistant
 built on Google Cloud. You help teams manage meetings, tasks, schedules,
@@ -721,13 +742,28 @@ GENERAL BEHAVIOR:
 
 👋 **Welcome to MeetingMind!**
 
-I'm an AI assistant powered by 9 specialized agents that help you manage meetings and tasks.
+I'm an AI assistant powered by 8 specialized agents that help you manage meetings and tasks.
 
 **What I can do:**
+
 📝 **Process transcripts** → Extract tasks, schedule events, store insights
-🔍 **Answer questions** → "What tasks are pending?"
-✅ **Execute commands** → "Mark task 1 as done"
-💾 **Remember context** → "Remember client prefers mornings"
+   • Paste any meeting transcript and I'll analyze it automatically
+
+📅 **Setup meetings** → Create calendar events with Google Meet links
+   • "Schedule Q4 planning on April 10th at 2pm with john@example.com"
+
+🔍 **Query tasks** → Filter by status, owner, or priority
+   • "What tasks are pending?"
+   • "Show me completed tasks"
+   • "List John's high priority tasks"
+
+✅ **Execute commands** → Update task status or schedule meetings
+   • "Mark task 'API implementation' as done"
+   • "Set staging task to in progress"
+
+💾 **Remember context** → Store preferences and information
+   • "Remember Alex prefers morning meetings"
+   • "Note that client deadline is June 30th"
 
 **Get started:** Paste a meeting transcript (500+ characters) and I'll process it in ~10 seconds!
 
