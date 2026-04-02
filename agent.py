@@ -58,16 +58,24 @@ def save_transcript_to_state(tool_context: ToolContext, transcript: str) -> dict
         transcript: The full meeting transcript text pasted by the user.
 
     Returns:
-        dict confirming the transcript was saved.
+        dict confirming the transcript was saved and prompting delegation.
     """
     tool_context.state["TRANSCRIPT"] = transcript
     session_id = getattr(tool_context, "session_id", None) or "session_default"
     tool_context.state["session_id"] = session_id
+
+    # Pre-initialize ALL state variables to prevent KeyError in sub-agents
+    tool_context.state["db_result"] = {"tasks_saved": 0, "status": "pending"}
+    tool_context.state["user_query"] = ""        # For query_agent
+    tool_context.state["user_command"] = ""      # For execution_agent
+    tool_context.state["memory_input"] = ""      # For memory_store_agent
+
     logging.info(f"Transcript saved to state ({len(transcript)} chars)")
     return {
         "status": "success",
-        "message": "Transcript received. Processing pipeline started.",
-        "length": len(transcript)
+        "message": "Transcript saved. Delegating to pipeline now (do not wait for user input).",
+        "length": len(transcript),
+        "next_action": "IMMEDIATE_DELEGATION_REQUIRED"
     }
 
 
@@ -81,6 +89,17 @@ def set_user_query(tool_context: ToolContext, query: str) -> dict:
     Returns:
         dict confirming query was saved.
     """
+    # Pre-initialize ALL state variables if not already set
+    if "TRANSCRIPT" not in tool_context.state:
+        tool_context.state["TRANSCRIPT"] = ""
+    if "user_command" not in tool_context.state:
+        tool_context.state["user_command"] = ""
+    if "memory_input" not in tool_context.state:
+        tool_context.state["memory_input"] = ""
+    if "db_result" not in tool_context.state:
+        tool_context.state["db_result"] = {"tasks_saved": 0, "status": "pending"}
+
+    # Set the actual query
     tool_context.state["user_query"] = query
     return {"status": "success", "query": query}
 
@@ -95,6 +114,17 @@ def set_user_command(tool_context: ToolContext, command: str) -> dict:
     Returns:
         dict confirming command was saved.
     """
+    # Pre-initialize ALL state variables if not already set
+    if "TRANSCRIPT" not in tool_context.state:
+        tool_context.state["TRANSCRIPT"] = ""
+    if "user_query" not in tool_context.state:
+        tool_context.state["user_query"] = ""
+    if "memory_input" not in tool_context.state:
+        tool_context.state["memory_input"] = ""
+    if "db_result" not in tool_context.state:
+        tool_context.state["db_result"] = {"tasks_saved": 0, "status": "pending"}
+
+    # Set the actual command
     tool_context.state["user_command"] = command
     return {"status": "success", "command": command}
 
@@ -109,6 +139,17 @@ def set_memory_input(tool_context: ToolContext, information: str) -> dict:
     Returns:
         dict confirming memory input was saved.
     """
+    # Pre-initialize ALL state variables if not already set
+    if "TRANSCRIPT" not in tool_context.state:
+        tool_context.state["TRANSCRIPT"] = ""
+    if "user_query" not in tool_context.state:
+        tool_context.state["user_query"] = ""
+    if "user_command" not in tool_context.state:
+        tool_context.state["user_command"] = ""
+    if "db_result" not in tool_context.state:
+        tool_context.state["db_result"] = {"tasks_saved": 0, "status": "pending"}
+
+    # Set the actual memory input
     tool_context.state["memory_input"] = information
     return {"status": "success", "information": information}
 
@@ -141,63 +182,54 @@ Return only the summary text. No preamble, no labels, just the summary.
     output_key="meeting_summary"
 )
 
-action_item_agent = Agent(
-    name="action_item_agent",
+action_item_priority_agent = Agent(
+    name="action_item_priority_agent",
     model=model_name,
-    description="Extracts specific action items and tasks from the meeting summary.",
+    description="Extracts, prioritizes, and formats action items as beautiful markdown.",
     instruction="""
-You are an action item extraction specialist.
+You are a task extraction and presentation expert.
 
-Based on MEETING_SUMMARY, extract every action item or task mentioned.
-
-For each action item identify:
-- task: what specifically needs to be done (be concrete)
-- owner: who is responsible (use "Unassigned" if not clear, or "Team: [name]" for groups)
-- deadline: when it's due (use "Not specified" if not mentioned)
-- confidence: how certain you are this is an actionable task (High/Medium/Low)
-
-EDGE CASE HANDLING:
-1. If owner is a team/group ("Design Team", "Everyone"), mark as "Team: [name]"
-2. If deadline is relative ("next week", "end of month"), include both relative and absolute if context allows: "2026-04-30 (end of month)"
-3. If task is vague or conditional ("we should look at...", "maybe consider..."), mark confidence as "Low"
-4. If task appears multiple times, list only once with note: "Finalize budget (mentioned 3 times)"
+Based on MEETING_SUMMARY, extract every action item, assign priority, and format beautifully.
 
 MEETING_SUMMARY:
 {meeting_summary}
 
-Return ONLY a valid JSON array. No markdown, no explanation, just JSON:
-[
-  {"task": "...", "owner": "...", "deadline": "...", "confidence": "High/Medium/Low"},
-  {"task": "...", "owner": "...", "deadline": "...", "confidence": "High/Medium/Low"}
-]
+For each task identify:
+- task: what specifically needs to be done (be concrete)
+- owner: who is responsible ("Unassigned" if unclear, "Team: [name]" for groups)
+- deadline: when it's due ("Not specified" if not mentioned)
+- priority: High (urgent/blocking/near deadline), Medium (important), or Low (nice-to-have)
 
-If no action items found, return: []
-""",
-    output_key="action_items"
-)
+Consider deadlines, business impact, and dependencies when assigning priority.
 
-priority_agent = Agent(
-    name="priority_agent",
-    model=model_name,
-    description="Scores and prioritizes extracted action items by urgency and impact.",
-    instruction="""
-You are a task prioritization expert.
+CRITICAL: Your FIRST character must be: ✅
 
-Review ACTION_ITEMS and assign a priority to each task:
-- High: urgent, blocks others, near deadline, or business-critical
-- Medium: important but not immediately blocking
-- Low: nice to have, no immediate pressure
+Format your output as beautiful markdown:
 
-Consider deadlines, business impact, and dependencies when prioritizing.
+✅ **Meeting Processed Successfully**
 
-ACTION_ITEMS:
-{action_items}
+📋 **Summary:**
+{meeting_summary}
 
-Return ONLY a valid JSON array with priority added. No markdown, no explanation:
-[
-  {"task": "...", "owner": "...", "deadline": "...", "priority": "High"},
-  {"task": "...", "owner": "...", "deadline": "...", "priority": "Medium"}
-]
+✅ **Action Items:**
+• **High** — [task] — Owner: [owner] — Due: [deadline]
+• **Medium** — [task] — Owner: [owner] — Due: [deadline]
+• **Low** — [task] — Owner: [owner] — Due: [deadline]
+
+(If no tasks: "No action items identified")
+
+📊 **System Status:**
+✅ Tasks extracted and prioritized
+✅ Calendar events will be created for scheduling tasks (with Google Meet links)
+✅ All data saved to database
+
+---
+✨ **What's next?**
+- "What tasks are pending?"
+- "Mark task 1 as done"
+- "Schedule a meeting..."
+
+CRITICAL: Output ONLY markdown. NO JSON. Start with ✅
 """,
     output_key="prioritized_tasks"
 )
@@ -210,57 +242,75 @@ Return ONLY a valid JSON array with priority added. No markdown, no explanation:
 scheduler_agent = Agent(
     name="scheduler_agent",
     model=model_name,
-    description="Schedules calendar events for high-priority tasks that need meetings.",
+    description="Creates REAL Google Calendar events with Meet links for scheduling tasks.",
     instruction="""
-You are a calendar scheduling assistant.
+You are a calendar scheduling assistant that creates REAL Google Calendar events.
 
-Review PRIORITIZED_TASKS and identify tasks that need a calendar event
-(e.g. reviews, meetings, deadlines with a specific date).
-
-For each High priority task that needs scheduling:
-1. Use get_available_slots to find a free time slot
-2. Use create_calendar_event to create the event
-
-Focus on tasks with specific deadlines or that require team coordination.
-
-PRIORITIZED_TASKS:
+PRIORITIZED_TASKS (markdown format):
 {prioritized_tasks}
 
-After scheduling, return a JSON array of created events:
-[{"title": "...", "time": "...", "attendees": [...], "status": "Created"}]
+Your job: Look for tasks that mention scheduling a meeting with a specific date/time.
 
-If nothing needed scheduling, return: []
+✅ Examples that SHOULD be scheduled:
+- "Schedule design review on June 15th at 10 AM with john@example.com"
+- "Book Q4 planning meeting April 10th 2pm with team"
+- "Set up client call tomorrow at 3pm with sarah@company.com"
+
+❌ Examples that should NOT be scheduled:
+- "Complete API implementation" (no meeting mentioned)
+- "Follow up next week" (no specific date/time)
+- "Schedule TBD" (date not specified)
+
+If you find a task that needs scheduling:
+1. Extract: title, date, time, attendees (email addresses)
+2. Call create_calendar_event with:
+   - title: "Design Review Meeting"
+   - start_time: "2026-06-15 10:00" (MUST be YYYY-MM-DD HH:MM format)
+   - duration_minutes: 60 (default) or parse from task
+   - attendees: "john@example.com,sarah@company.com" (comma-separated emails)
+   - description: "Scheduled from meeting transcript"
+
+3. The tool will:
+   ✅ Create a REAL Google Calendar event
+   ✅ Generate a Google Meet link automatically
+   ✅ Send email invitations to all attendees
+
+If NO tasks need scheduling, return empty string: ""
+
+IMPORTANT:
+- Only schedule if date AND time are clearly specified
+- Attendees should be email addresses (use @example.com if only names given)
+- If uncertain about date/time, don't schedule
+- If nothing to schedule, return empty string
+
+Return empty string if no events scheduled, otherwise return confirmation.
 """,
-    tools=[get_available_slots, create_calendar_event],
+    tools=[create_calendar_event],
     output_key="scheduled_events"
 )
 
 duplicate_check_agent = Agent(
     name="duplicate_check_agent",
     model=model_name,
-    description="Checks for duplicate tasks in DB and saves new unique tasks.",
+    description="Silently saves tasks to database - outputs nothing.",
     instruction="""
 You are a database task manager.
 
-For each task in PRIORITIZED_TASKS:
-1. Use check_duplicate_tasks to check if a similar task already exists in the DB
-2. If NOT a duplicate: use save_tasks to save the new task
-3. If IS a duplicate: skip it and note it was skipped
+IMPORTANT: This agent should save tasks silently without producing any output.
 
-Process all tasks and track results.
+Your job:
+1. Extract task data from the markdown in PRIORITIZED_TASKS
+2. Parse each task line like: "• **High** — Task description — Owner: Name — Due: Date"
+3. Save all tasks using save_tasks tool
 
 PRIORITIZED_TASKS:
 {prioritized_tasks}
 
-After processing all tasks, return a JSON summary:
-{
-  "tasks_saved": N,
-  "duplicates_skipped": N,
-  "saved_task_names": [...],
-  "skipped_task_names": [...]
-}
+After saving, return an empty string: ""
+
+Do NOT output JSON. Do NOT output confirmation. Just save silently.
 """,
-    tools=[check_duplicate_tasks, save_tasks],
+    tools=[save_tasks],
     output_key="db_result"
 )
 
@@ -332,57 +382,72 @@ After saving, return:
 briefing_agent = Agent(
     name="briefing_agent",
     model=model_name,
-    description="Assembles all agent outputs into a clean, structured executive briefing.",
+    description="Assembles all agent outputs into a beautiful, user-friendly markdown summary.",
     instruction="""
-You are an executive briefing writer.
+You are an executive briefing writer who creates beautiful, readable summaries.
 
-Compile all results from the pipeline into a complete, professional JSON response.
-
-Inputs:
+Inputs available:
 MEETING_SUMMARY: {meeting_summary}
 PRIORITIZED_TASKS: {prioritized_tasks}
-SCHEDULED_EVENTS: {scheduled_events}
 DB_RESULT: {db_result}
-NOTES_RESULT: {notes_result}
-MEMORY_RESULT: {memory_result}
 
-Return ONLY a valid JSON object (no markdown fences):
-{
-  "meeting_summary": "the meeting summary text",
-  "action_items": [
-    {"task": "...", "owner": "...", "deadline": "...", "priority": "High/Medium/Low"}
-  ],
-  "scheduled_events": [
-    {"title": "...", "time": "...", "attendees": [...], "status": "Created"}
-  ],
-  "related_notes": [
-    {"title": "...", "relevance": "...", "date": "..."}
-  ],
-  "execution_confirmations": [
-    "X tasks saved to database",
-    "Y duplicates skipped",
-    "Z calendar events created",
-    "Meeting note saved",
-    "N memories stored"
-  ],
-  "metrics": {
-    "agents_executed": <count of agents that ran>,
-    "sequential_time_estimate": "<estimated time for sequential execution in seconds>",
-    "parallel_time_estimate": "<estimated time for parallel execution in seconds>",
-    "speedup_ratio": "<parallel speedup ratio>",
-    "message": "Parallel execution saved X seconds compared to sequential processing"
-  },
-  "briefing": "2-3 sentence executive summary of what was processed and what needs attention"
-}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CRITICAL OUTPUT CONSTRAINT (ABSOLUTE REQUIREMENT):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Your FIRST character of output MUST be: ✅
 
-Be accurate — only include items that were actually processed.
-Calculate metrics based on typical agent execution times:
-- Sequential chain (3 agents): ~6 seconds total
-- Parallel branch (4 agents): ~3 seconds (runs simultaneously)
-- Briefing agent: ~2 seconds
-Without parallelism: 6 + (4 * 3) + 2 = 20 seconds
-With parallelism: 6 + 3 + 2 = 11 seconds
-Speedup: 20/11 = 1.8x
+If your output starts with any of these, you FAILED:
+- Starting with "[" → WRONG (that's JSON array)
+- Starting with "{" → WRONG (that's JSON object)
+- Starting with "`" → WRONG (that's code block)
+
+CORRECT first 10 characters of your output: "✅ **Meet"
+
+Now generate the full markdown summary in this format:
+
+✅ **Meeting Processed Successfully**
+
+📋 **Summary:**
+{meeting_summary}
+
+✅ **Action Items:**
+[For each task in PRIORITIZED_TASKS, format as:]
+• **[priority]** — [task] — Owner: [owner] — Due: [deadline]
+
+[If PRIORITIZED_TASKS is empty, write: "No action items identified"]
+
+💾 **System Actions:**
+• [tasks_saved] tasks saved to database
+• All tasks stored for future queries
+
+📊 **Performance:**
+Processed by 4 agents sequentially (~8-10 seconds, optimized for reliability)
+
+---
+✨ **What's next? Try these commands:**
+- "What tasks are pending?"
+- "Show me high priority tasks"
+- "Mark task [number] as done"
+
+---
+
+CRITICAL OUTPUT RULES:
+1. Return ONLY formatted markdown text (NOT JSON, NOT code blocks)
+2. Start immediately with "✅ **Meeting Processed Successfully**"
+3. Do NOT wrap in ```markdown blocks
+4. Do NOT output as JSON object
+5. Output as plain text with markdown formatting
+
+CORRECT OUTPUT EXAMPLE:
+✅ **Meeting Processed Successfully**
+
+📋 **Summary:**
+The team discussed Q3 mobile app launch...
+
+WRONG OUTPUT EXAMPLES:
+❌ {"status": "success", "summary": "..."}  ← NO JSON!
+❌ ```markdown\n✅ Meeting...```  ← NO code blocks!
+❌ [{"task": "..."}]  ← NO arrays!
 """,
     output_key="final_briefing"
 )
@@ -402,7 +467,7 @@ You are a helpful knowledge retrieval assistant for MeetingMind.
 The user has asked a question. Use your tools to find the answer.
 
 Available tools:
-- list_my_tasks: find tasks (filter by owner, priority)
+- list_my_tasks: find tasks (filter by owner, priority, or status: Pending/In Progress/Done/Cancelled)
 - search_related_notes: search past meeting notes
 - get_memory: retrieve stored information
 
@@ -424,20 +489,55 @@ execution_agent = Agent(
     instruction="""
 You are a task execution assistant for MeetingMind.
 
-The user has given you a command to execute. Use your tools to carry it out.
+The user wants to execute a command. Parse what they want and use the appropriate tool.
 
 Available tools:
-- mark_task_done: mark a task as completed
-- mark_task_in_progress: mark a task as in progress
-- update_task_status: set any status on a task
-- create_calendar_event: schedule a new meeting or event
-- save_note: add a new note
+- mark_task_done(task_name): mark a task as completed (use partial task name)
+- mark_task_in_progress(task_name): mark a task as in progress
+- update_task_status(task_name, status): set any custom status
+- create_calendar_event(title, start_time, duration_minutes, attendees, description): schedule with Google Meet
+- save_note(...): add a new note
 
-User command:
+User's request:
 {user_command}
 
-Execute the command using the appropriate tool(s).
-Confirm exactly what was done in your response.
+Examples:
+- "Mark task 1 as done" → mark_task_done("first task name")
+- "Set Alex's campaign task as done" → mark_task_done("launch campaign")
+- "Mark API task in progress" → mark_task_in_progress("API")
+- "Schedule Q4 planning on April 10th at 2pm with john@example.com" →
+  create_calendar_event(
+    title="Q4 Planning",
+    start_time="2026-04-10 14:00",
+    duration_minutes=60,
+    attendees="john@example.com",
+    description="Scheduled via MeetingMind"
+  )
+
+CRITICAL for calendar event creation:
+1. title: Extract the meeting name from request (e.g. "Q4 planning" → "Q4 Planning")
+2. start_time: MUST be EXACTLY in "YYYY-MM-DD HH:MM" format (24-hour time)
+   - Convert "April 10th" → "2026-04-10" (use year 2026 if not specified)
+   - Convert "2pm" → "14:00", "10am" → "10:00", "9:30am" → "09:30"
+3. duration_minutes: Default to 60 if not specified
+4. attendees: Comma-separated email addresses (e.g. "john@example.com,sarah@gmail.com")
+5. description: Brief note about the meeting (optional)
+
+The system creates REAL Google Calendar events with Google Meet links.
+Events are placed directly on the user's calendar (when CALENDAR_ID is shared).
+
+IMPORTANT: Service accounts CANNOT send email invitations, even with shared calendars.
+Attendee emails are saved in the event description for manual invitation.
+
+After executing ANY command, provide a clear confirmation.
+For calendar events, format the response as:
+
+✅ **Calendar Event Created**
+📅 [title] - [date] at [time]
+🔗 **Google Meet:** [meeting_link]
+📧 **To invite guests:** Open the event in Google Calendar and click "Add guests" to invite: [attendee_list]
+
+Make the Meet link prominent so user can share it immediately.
 """,
     tools=[
         mark_task_done,
@@ -476,30 +576,17 @@ Save it and confirm what you stored.
 # PIPELINE ASSEMBLY
 # ══════════════════════════════════════════════════════════════
 
-# Step 1: Sequential chain — summary then actions then priority
-sequential_chain = SequentialAgent(
-    name="sequential_chain",
-    description="Processes transcript sequentially: summarize → extract actions → prioritize.",
-    sub_agents=[summary_agent, action_item_agent, priority_agent]
-)
-
-# Step 2: Parallel branch — schedule, save to DB, search notes, store memory simultaneously
-parallel_branch = ParallelAgent(
-    name="parallel_branch",
-    description="Simultaneously schedules events, saves tasks to DB, searches notes, and stores memory.",
-    sub_agents=[
-        scheduler_agent,
-        duplicate_check_agent,
-        notes_agent,
-        memory_agent_background
-    ]
-)
-
-# Full transcript pipeline: sequential → parallel → briefing
+# 4-agent pipeline with REAL calendar integration!
+# action_item_priority_agent outputs markdown, scheduler creates REAL Google Calendar events
 transcript_pipeline = SequentialAgent(
     name="transcript_pipeline",
-    description="End-to-end meeting transcript processing pipeline.",
-    sub_agents=[sequential_chain, parallel_branch, briefing_agent]
+    description="Transcript processing with real calendar event creation (4 agents).",
+    sub_agents=[
+        summary_agent,                # 1. Summarize transcript
+        action_item_priority_agent,   # 2. Extract + Prioritize + FORMAT AS MARKDOWN!
+        scheduler_agent,              # 3. Create REAL calendar events with Meet links!
+        duplicate_check_agent,        # 4. Save tasks to DB (silent, no output)
+    ]
 )
 
 
@@ -510,11 +597,23 @@ transcript_pipeline = SequentialAgent(
 root_agent = Agent(
     name="meetingmind",
     model=model_name,
-    description="MeetingMind — Multi-Agent Productivity Assistant",
+    description="MeetingMind — AI Meeting Assistant | Paste transcripts to extract tasks & schedule events | Powered by 9 agents",
     instruction="""
 You are MeetingMind, an intelligent multi-agent productivity assistant
 built on Google Cloud. You help teams manage meetings, tasks, schedules,
 and information through natural conversation.
+
+CRITICAL: If the user's FIRST message is a greeting ("hi", "hello", "hey") or asks "what can you do",
+respond with the welcome message explaining your capabilities BEFORE they paste a transcript.
+
+═══════════════════════════════════════════
+FUNCTION CALLING BEST PRACTICES
+═══════════════════════════════════════════
+When calling tools with long text parameters (especially transcripts):
+- Pass the ENTIRE user message as-is
+- Do NOT try to escape quotes, newlines, or special characters manually
+- The ADK runtime handles all escaping automatically
+- Just invoke the function with the raw text parameter
 
 ═══════════════════════════════════════════
 INTENT DETECTION — TWO-PASS CLASSIFICATION
@@ -539,28 +638,104 @@ Read the message carefully and determine the most likely intent:
 
 INTENT A — TRANSCRIPT
 Long text with discussion, decisions, names, action items.
-→ Call save_transcript_to_state → transfer to transcript_pipeline
+→ Step 1: Call save_transcript_to_state tool with the ENTIRE user message as the transcript parameter
+  CRITICAL: Pass the full multi-line text exactly as provided. The function handles escaping.
+→ Step 2: Immediately delegate to the transcript_pipeline sub-agent to process it - DO NOT output text yet
+→ Step 3: Wait for sub-agent to return results
+→ Step 4: Relay the sub-agent's formatted output directly to user (NO parsing, NO modification)
 
 INTENT B — QUESTION
 Asking about stored data, tasks, notes, or memory.
-→ Call set_user_query → transfer to query_agent
+→ Step 1: Call set_user_query(query=<the question>) - DO NOT output text yet
+→ Step 2: Immediately delegate to the query_agent sub-agent to answer - DO NOT output text yet
+→ Step 3: Relay query_agent's response directly to user (NO modification)
 
 INTENT C — COMMAND
 Wants to take an action (mark done, schedule, update).
-→ Call set_user_command → transfer to execution_agent
+→ Step 1: Call set_user_command(command=<the action>) - DO NOT output text yet
+→ Step 2: Immediately delegate to the execution_agent sub-agent to execute - DO NOT output text yet
+→ Step 3: Relay execution_agent's confirmation directly to user (NO modification)
 
 INTENT D — STORE
 Wants you to remember something for future sessions.
-→ Call set_memory_input → transfer to memory_store_agent
+→ Step 1: Call set_memory_input(information=<what to remember>) - DO NOT output text yet
+→ Step 2: Immediately delegate to the memory_store_agent sub-agent to store - DO NOT output text yet
+→ Step 3: Relay memory_store_agent's confirmation directly to user (NO modification)
+
+═══════════════════════════════════════════
+CRITICAL: DELEGATION WORKFLOW
+═══════════════════════════════════════════
+After calling the state-setting tool (save_transcript_to_state, set_user_query, etc.),
+you MUST immediately delegate to the corresponding sub-agent. Do not wait for user input.
+The sub-agent will process the request and return the final result.
+
+Example for TRANSCRIPT intent:
+1. User pastes transcript → You detect INTENT A
+2. You call save_transcript_to_state(transcript=<full text>) WITHOUT outputting any text
+3. You IMMEDIATELY delegate to transcript_pipeline sub-agent WITHOUT outputting any text
+4. transcript_pipeline processes and returns beautiful formatted markdown starting with "✅ **Meeting"
+5. ONLY AFTER sub-agent returns: Copy that exact text as your output (starts with ✅, NOT with [ or {)
+
+CRITICAL: Do not output text before delegating. The sub-agent call and text response cannot happen in the same turn.
+
+═══════════════════════════════════════════
+CRITICAL: OUTPUT HANDLING - RELAY AS-IS
+═══════════════════════════════════════════
+ALL sub-agents return pre-formatted, user-ready output. Your ONLY job is to relay it unchanged.
+
+FOR TRANSCRIPT PROCESSING (Intent A):
+The transcript_pipeline's briefing_agent returns beautiful markdown like:
+"✅ **Meeting Processed Successfully**\n\n📋 **Summary:**\nThe team discussed..."
+→ YOUR OUTPUT: Copy that text EXACTLY. Do NOT convert to JSON. Do NOT wrap in code blocks.
+
+FOR QUESTIONS (Intent B):
+The query_agent returns formatted results.
+→ RELAY IT EXACTLY AS-IS.
+
+FOR COMMANDS (Intent C):
+The execution_agent returns confirmation message.
+→ RELAY IT EXACTLY AS-IS.
+
+FOR MEMORY STORAGE (Intent D):
+The memory_store_agent returns confirmation.
+→ RELAY IT EXACTLY AS-IS.
+
+═══════════════════════════════════════════
+WRONG OUTPUT BEHAVIORS (DO NOT DO THESE):
+═══════════════════════════════════════════
+❌ Converting sub-agent output to JSON: {"summary": "...", "tasks": [...]}
+❌ Wrapping in code blocks: ```markdown\n...```
+❌ Parsing and reformatting: "Here's what I found: [list]"
+❌ Adding your own commentary: "I've processed the transcript..."
+
+✅ CORRECT: Just output the sub-agent's text verbatim.
+
+Example:
+Sub-agent returns: "✅ **Meeting Processed Successfully**..."
+Your output: "✅ **Meeting Processed Successfully**..." ← Exactly the same!
 
 ═══════════════════════════════════════════
 GENERAL BEHAVIOR:
 ═══════════════════════════════════════════
-- For new conversations, greet the user as MeetingMind
+- When user says "hello", "hi", or asks "what can you do", respond with:
+
+👋 **Welcome to MeetingMind!**
+
+I'm an AI assistant powered by 9 specialized agents that help you manage meetings and tasks.
+
+**What I can do:**
+📝 **Process transcripts** → Extract tasks, schedule events, store insights
+🔍 **Answer questions** → "What tasks are pending?"
+✅ **Execute commands** → "Mark task 1 as done"
+💾 **Remember context** → "Remember client prefers mornings"
+
+**Get started:** Paste a meeting transcript (500+ characters) and I'll process it in ~10 seconds!
+
 - Be conversational and helpful
 - If intent confidence is low after both passes, ask one clarifying question
-- Always confirm what was done after executing any action
-- For transcripts, let the user know processing has started
+- NEVER show raw JSON to the user - always format it nicely
+- CRITICAL: Do NOT output text AND delegate in the same turn - it causes function calls to be dropped
+- When delegating to sub-agents: call tools silently, delegate silently, THEN format the sub-agent's response
 """,
     tools=[
         save_transcript_to_state,

@@ -1,6 +1,6 @@
 """
 MeetingMind — Calendar MCP Server
-Exposes calendar tools via MCP protocol.
+Exposes calendar tools via MCP protocol with REAL Google Calendar integration.
 """
 
 import asyncio
@@ -12,10 +12,32 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
+# Google Calendar API imports
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+
 # Initialize MCP server
 server = Server("calendar-mcp")
 
 logging.basicConfig(level=logging.INFO)
+
+# Google Calendar API setup
+SCOPES = ['https://www.googleapis.com/auth/calendar']
+CALENDAR_ID = os.getenv("CALENDAR_ID", "primary")  # Use 'primary' for service account's calendar
+
+def get_calendar_service():
+    """Get authenticated Google Calendar service using Application Default Credentials."""
+    try:
+        # Use ADC (works automatically on Cloud Run with service account)
+        from google.auth import default
+        credentials, project = default(scopes=SCOPES)
+        service = build('calendar', 'v3', credentials=credentials)
+        logging.info("Calendar service authenticated via ADC")
+        return service
+    except Exception as e:
+        logging.error(f"Failed to authenticate Calendar API: {e}")
+        return None
 
 
 @server.list_tools()
@@ -117,27 +139,114 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if attendees:
             attendee_list = [a.strip() for a in attendees.split(",") if a.strip()]
 
-        # Mock implementation - generates event details
-        # In production, this would create actual Google Calendar events
-        event_id = f"mcp_evt_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
-        event = {
-            "id": event_id,
-            "title": title,
-            "start_time": start_time,
-            "duration_minutes": duration_minutes,
-            "attendees": attendee_list,
-            "description": description,
-            "meeting_link": f"https://meet.google.com/{event_id[-10:]}",
-            "status": "Created via MCP",
-            "source": "MCP Calendar Server"
-        }
+        # REAL Google Calendar API Integration
+        service = get_calendar_service()
 
-        logging.info(f"MCP Calendar event created: '{title}' at {start_time}")
+        if service is None:
+            # Fallback to mock if Calendar API not available
+            logging.warning("Calendar API unavailable, using mock")
+            event_id = f"mock_evt_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+            event = {
+                "id": event_id,
+                "title": title,
+                "start_time": start_time,
+                "duration_minutes": duration_minutes,
+                "attendees": attendee_list,
+                "description": description,
+                "meeting_link": f"https://meet.google.com/{event_id[-10:]}",
+                "status": "Mock Event (Calendar API not configured)",
+                "source": "MCP Calendar Server (Mock)"
+            }
+            return [TextContent(type="text", text=str({"status": "mock", "event": event}))]
 
-        return [TextContent(
-            type="text",
-            text=str({"status": "success", "event": event})
-        )]
+        try:
+            # Parse start time and calculate end time
+            start_dt = datetime.strptime(start_time, "%Y-%m-%d %H:%M")
+            end_dt = start_dt + timedelta(minutes=duration_minutes)
+
+            # Format for Google Calendar API (ISO 8601 with timezone)
+            timezone = "America/Los_Angeles"  # Adjust based on your needs
+            start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%S")
+            end_iso = end_dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+            # Build event body
+            event_body = {
+                'summary': title,
+                'description': description or f"Created by MeetingMind from meeting transcript",
+                'start': {
+                    'dateTime': start_iso,
+                    'timeZone': timezone,
+                },
+                'end': {
+                    'dateTime': end_iso,
+                    'timeZone': timezone,
+                },
+                'conferenceData': {
+                    'createRequest': {
+                        'requestId': f"meetingmind-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
+                        'conferenceSolutionKey': {'type': 'hangoutsMeet'}
+                    }
+                },
+                'reminders': {
+                    'useDefault': False,
+                    'overrides': [
+                        {'method': 'email', 'minutes': 24 * 60},  # 1 day before
+                        {'method': 'popup', 'minutes': 30},        # 30 min before
+                    ],
+                },
+            }
+
+            # Add attendees if provided (metadata only - service accounts can't send invites)
+            if attendee_list:
+                event_body['attendees'] = [{'email': email} for email in attendee_list]
+
+            # Create the event
+            # Note: Service accounts cannot send email invitations without Domain-Wide Delegation
+            created_event = service.events().insert(
+                calendarId=CALENDAR_ID,
+                body=event_body,
+                conferenceDataVersion=1,  # Required for Google Meet links
+                sendUpdates='none'  # Don't send invites (service account limitation)
+            ).execute()
+
+            # Extract Google Meet link
+            meet_link = created_event.get('hangoutLink', 'No meeting link')
+
+            event = {
+                "id": created_event.get('id'),
+                "title": title,
+                "start_time": start_time,
+                "duration_minutes": duration_minutes,
+                "attendees": attendee_list,
+                "description": description,
+                "meeting_link": meet_link,
+                "calendar_link": created_event.get('htmlLink', ''),
+                "status": "✅ REAL Calendar Event Created",
+                "source": "Google Calendar API via MCP",
+                "timezone": timezone
+            }
+
+            logging.info(f"✅ REAL Calendar event created: '{title}' at {start_time} | Link: {meet_link}")
+
+            return [TextContent(
+                type="text",
+                text=str({"status": "success", "event": event, "real_event": True})
+            )]
+
+        except HttpError as e:
+            error_msg = f"Google Calendar API error: {e}"
+            logging.error(error_msg)
+            return [TextContent(
+                type="text",
+                text=str({"status": "error", "message": error_msg})
+            )]
+        except Exception as e:
+            error_msg = f"Error creating calendar event: {e}"
+            logging.error(error_msg)
+            return [TextContent(
+                type="text",
+                text=str({"status": "error", "message": error_msg})
+            )]
 
     else:
         raise ValueError(f"Unknown tool: {name}")

@@ -108,12 +108,18 @@ echo ""
 echo "Updating Cloud Run service configuration..."
 echo ""
 
+# Get Cloud SQL connection name for proxy
+DB_INSTANCE="meetingmind-db"
+CLOUD_SQL_CONNECTION="${PROJECT_ID}:${REGION}:${DB_INSTANCE}"
+echo "Cloud SQL connection name: $CLOUD_SQL_CONNECTION"
+
 # Update service with additional configuration
 gcloud run services update meetingmind \
   --project=$PROJECT_ID \
   --region=$REGION \
   --service-account=$SERVICE_ACCOUNT \
-  --set-env-vars="DB_HOST=$DB_HOST,DB_NAME=$DB_NAME,DB_USER=$DB_USER,DB_PASSWORD=$DB_PASSWORD,DB_PORT=$DB_PORT,MODEL=$MODEL,PROJECT_ID=$PROJECT_ID" \
+  --add-cloudsql-instances=$CLOUD_SQL_CONNECTION \
+  --set-env-vars="DB_HOST=$DB_HOST,DB_NAME=$DB_NAME,DB_USER=$DB_USER,DB_PASSWORD=$DB_PASSWORD,DB_PORT=$DB_PORT,MODEL=$MODEL,PROJECT_ID=$PROJECT_ID,GOOGLE_GENAI_USE_VERTEXAI=TRUE,CALENDAR_ID=${CALENDAR_ID:-primary},TIMEZONE=${TIMEZONE:-America/Los_Angeles}" \
   --memory=1Gi \
   --cpu=1 \
   --min-instances=0 \

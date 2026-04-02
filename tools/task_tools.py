@@ -17,19 +17,21 @@ from .db_tools import (
 def list_my_tasks(
     tool_context: ToolContext,
     owner: Optional[str] = None,
-    priority: Optional[str] = None
+    priority: Optional[str] = None,
+    status: Optional[str] = None
 ) -> dict:
-    """List pending tasks, optionally filtered by owner or priority.
+    """List tasks, optionally filtered by owner, priority, or status.
 
     Args:
         tool_context: ADK tool context.
         owner: Filter by task owner name (partial match).
         priority: Filter by priority - High, Medium, or Low.
+        status: Filter by status - Pending, In Progress, Done, or Cancelled.
 
     Returns:
         dict with list of matching tasks.
     """
-    result = get_pending_tasks(tool_context, owner=owner, priority=priority)
+    result = get_pending_tasks(tool_context, owner=owner, priority=priority, status=status)
 
     if result["status"] == "success":
         tasks = result["tasks"]

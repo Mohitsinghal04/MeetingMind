@@ -5,3 +5,7 @@ google-cloud-logging==3.9.0
 google-cloud-aiplatform==1.95.1
 mcp>=1.5.0
 deprecated
+google-api-python-client>=2.157.0
+google-auth>=2.25.2
+google-auth-httplib2>=0.2.0
+google-auth-oauthlib>=1.2.0

@@ -5,8 +5,8 @@
 # ============================================================
 
 # ── STEP 1: Set your project ────────────────────────────────
-export PROJECT_ID="your-project-id"       # ← CHANGE THIS
-export REGION="asia-south1"
+export PROJECT_ID="genai-hackathon-2026-491904"
+export REGION="us-central1"
 export SA_NAME="meetingmind-sa"
 export DB_INSTANCE="meetingmind-db"
 export DB_NAME="meetingmind"
