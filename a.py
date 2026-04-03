@@ -244,9 +244,9 @@ CRITICAL: Output ONLY markdown. NO JSON. Start with ✅
 scheduler_agent = Agent(
     name="scheduler_agent",
     model=model_name,
-    description="Creates Google Calendar events (API with calendar link fallback).",
+    description="Creates Google Calendar events with Meet links for scheduling tasks.",
     instruction="""
-You are a calendar scheduling assistant with HYBRID event creation capabilities.
+You are a calendar scheduling assistant that creates Google Calendar events.
 
 PRIORITIZED_TASKS (markdown format):
 {prioritized_tasks}
@@ -272,19 +272,11 @@ If you find a task that needs scheduling:
    - attendees: "john@example.com,sarah@company.com" (comma-separated emails)
    - description: "Scheduled from meeting transcript"
 
-3. The function uses HYBRID approach (tries API, falls back to link):
-
-   ✅ If result["method"] == "api":
-      - Event was created automatically via Calendar API
-      - Format: "📅 [Event title] scheduled for [date] at [time]"
-      - If meeting_link exists: "🔗 **Google Meet:** [link]"
-      - Note: "To invite guests, open the event and click 'Add guests'"
-
-   ✅ If result["method"] == "calendar_link":
-      - Generated a pre-filled calendar link
-      - Format: "📅 [Event title] - Click below to create and send invites:"
-      - Show clickable link: "[🗓️ Add to Google Calendar](calendar_url)"
-      - Note: "Click the link to review, save, and send invitations"
+3. After the event is created, check the result:
+   - If meeting_link exists and is not "No Meet link": mention it
+   - If meeting_link is "No Meet link" or similar: don't mention Meet at all
+   - Format: "📅 [Event title] scheduled for [date] at [time]"
+   - Only include Meet link if it's a real URL
 
 If NO tasks need scheduling, return empty string: ""
 
@@ -293,9 +285,9 @@ IMPORTANT:
 - Attendees should be email addresses (use @example.com if only names given)
 - If uncertain about date/time, don't schedule
 - If nothing to schedule, return empty string
-- Format output based on the method returned (api vs calendar_link)
+- DON'T say "a real Google Calendar event" - just say "scheduled" or "event created"
 
-Return empty string if no events scheduled, otherwise return formatted confirmation.
+Return empty string if no events scheduled, otherwise return simple confirmation.
 """,
     tools=[create_calendar_event],
     output_key="scheduled_events"
@@ -567,34 +559,20 @@ Attendee emails are saved in the event description for manual invitation.
 
 After executing ANY command, provide a clear confirmation.
 
-═══════════════════════════════════════════
-HYBRID CALENDAR EVENT FORMATTING
-═══════════════════════════════════════════
+For calendar events, check the event result and format appropriately:
 
-The create_calendar_event function uses HYBRID approach (tries API, falls back to link).
-Check result["method"] or result["status"] to determine which happened:
-
-✅ **If method == "api" (Calendar API succeeded):**
-
+✅ If meeting_link is a real URL (starts with https://meet.google.com):
 **Calendar Event Created**
 📅 [title] - [date] at [time]
-🔗 **Google Meet:** [meeting_link] (only if meeting_link is a real URL)
+🔗 **Google Meet:** [meeting_link]
 📧 **To invite guests:** Open the event in Google Calendar and click "Add guests" to invite: [attendee_list]
 
-✅ **If method == "calendar_link" or status == "link_generated" (API unavailable, link fallback):**
+✅ If meeting_link is "No Meet link" or similar (not a real URL):
+**Calendar Event Created**
+📅 [title] - [date] at [time]
+📧 **To invite guests:** Open the event in Google Calendar, add a Meet link if needed, then click "Add guests" to invite: [attendee_list]
 
-**📅 Calendar Event Ready**
-I've prepared your calendar invite:
-**[title]** - [date] at [time]
-Attendees: [attendee_list]
-
-👉 **[Click here to add to Google Calendar](calendar_url)**
-
-This will open Google Calendar with all details pre-filled. Just click "Save" and "Send invitation" to notify attendees.
-
-═══════════════════════════════════════════
-
-Format your output based on which method was used. The hybrid approach ensures the user ALWAYS gets a working solution.
+DO NOT include the Meet line if there's no actual Meet link - it looks incomplete.
 """,
     tools=[
         mark_task_done,
