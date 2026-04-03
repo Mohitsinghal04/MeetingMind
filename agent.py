@@ -277,7 +277,8 @@ If you find a task that needs scheduling:
    ✅ If result["method"] == "api":
       - Event was created automatically via Calendar API
       - Format: "📅 [Event title] scheduled for [date] at [time]"
-      - If meeting_link exists: "🔗 **Google Meet:** [link]"
+      - ONLY if meeting_link exists AND is a valid URL: "🔗 **Google Meet:** [link]"
+      - CRITICAL: Do NOT show Meet line if meeting_link is None, empty, or not a real URL
       - Note: "To invite guests, open the event and click 'Add guests'"
 
    ✅ If result["method"] == "calendar_link":
@@ -576,10 +577,20 @@ Check result["method"] or result["status"] to determine which happened:
 
 ✅ **If method == "api" (Calendar API succeeded):**
 
+Check if meeting_link exists and is a real URL (starts with https://meet.google.com):
+
+**If meeting_link is a valid URL:**
 **Calendar Event Created**
 📅 [title] - [date] at [time]
-🔗 **Google Meet:** [meeting_link] (only if meeting_link is a real URL)
+🔗 **Google Meet:** [meeting_link]
 📧 **To invite guests:** Open the event in Google Calendar and click "Add guests" to invite: [attendee_list]
+
+**If meeting_link is None, empty, or not a valid URL:**
+**Calendar Event Created**
+📅 [title] - [date] at [time]
+📧 **To invite guests:** Open the event in Google Calendar, add a Meet link if needed, then click "Add guests" to invite: [attendee_list]
+
+CRITICAL: DO NOT show the Meet line if there's no actual Meet link. Only include it if meeting_link starts with "https://meet.google.com"
 
 ✅ **If method == "calendar_link" or status == "link_generated" (API unavailable, link fallback):**
 
@@ -594,7 +605,7 @@ This will open Google Calendar with all details pre-filled. Just click "Save" an
 
 ═══════════════════════════════════════════
 
-Format your output based on which method was used. The hybrid approach ensures the user ALWAYS gets a working solution.
+Format your output based on which method was used and whether a Meet link exists. Never show "Google Meet: (No Google Meet link...)" - just omit the Meet line entirely if there's no link.
 """,
     tools=[
         mark_task_done,
