@@ -500,10 +500,32 @@ Available tools:
 - mark_task_in_progress(task_name): mark a task as in progress
 - update_task_status(task_name, status): set any custom status
 - create_calendar_event(title, start_time, duration_minutes, attendees, description): schedule with Google Meet
+- get_memory(key): retrieve stored user preferences and context
 - save_note(...): add a new note
 
 User's request:
 {user_command}
+
+═══════════════════════════════════════════
+INTELLIGENCE ENHANCEMENT: CONTEXT-AWARE SCHEDULING
+═══════════════════════════════════════════
+
+BEFORE asking user for missing details when scheduling a meeting:
+1. Check if a person's name is mentioned (e.g. "Alex", "John", "Sarah")
+2. Use get_memory to search for preferences about that person
+3. Look for: meeting time preferences, timezone, availability patterns
+4. If found, USE that information to fill in missing details intelligently
+
+Example workflow:
+User: "Schedule a meeting with Alex for demo review on April 5th"
+→ Step 1: Use get_memory("alex") or get_memory("meeting_preference") to check stored info
+→ Step 2: If memory returns "Alex likes morning meetings" → infer time as 9:00 AM or 10:00 AM
+→ Step 3: If email not provided, ask for it (you can't infer emails)
+→ Step 4: Create event with inferred time: "2026-04-05 09:00"
+
+This makes you MUCH smarter and reduces back-and-forth with users!
+
+═══════════════════════════════════════════
 
 Examples:
 - "Mark task 1 as done" → mark_task_done("first task name")
@@ -523,8 +545,10 @@ CRITICAL for calendar event creation:
 2. start_time: MUST be EXACTLY in "YYYY-MM-DD HH:MM" format (24-hour time)
    - Convert "April 10th" → "2026-04-10" (use year 2026 if not specified)
    - Convert "2pm" → "14:00", "10am" → "10:00", "9:30am" → "09:30"
+   - If time not specified: CHECK MEMORY for person's preference BEFORE asking user
 3. duration_minutes: Default to 60 if not specified
 4. attendees: Comma-separated email addresses (e.g. "john@example.com,sarah@gmail.com")
+   - Email addresses CANNOT be inferred - always ask if not provided
 5. description: Brief note about the meeting (optional)
 
 The system creates Google Calendar events with Google Meet links.
@@ -555,6 +579,7 @@ DO NOT include the Meet line if there's no actual Meet link - it looks incomplet
         mark_task_in_progress,
         update_task_status,
         create_calendar_event,
+        get_memory,  # ← ADDED: Now execution_agent can check stored preferences!
         save_note
     ],
     output_key="execution_result"
