@@ -9,24 +9,54 @@ import json
 import logging
 from datetime import datetime
 from typing import Optional
+from contextlib import contextmanager
 
 import psycopg2
 import psycopg2.extras
+from psycopg2.pool import ThreadedConnectionPool
 from google.adk.tools.tool_context import ToolContext
 
 
-# ── CONNECTION ────────────────────────────────────────────────
+# ── CONNECTION POOLING ────────────────────────────────────────────────
 
+# Global connection pool (initialized on first use)
+_connection_pool = None
+
+
+def _initialize_pool():
+    """Initialize the connection pool if not already initialized."""
+    global _connection_pool
+    if _connection_pool is None:
+        _connection_pool = ThreadedConnectionPool(
+            minconn=1,
+            maxconn=10,
+            host=os.getenv("DB_HOST"),
+            database=os.getenv("DB_NAME", "meetingmind"),
+            user=os.getenv("DB_USER"),
+            password=os.getenv("DB_PASSWORD"),
+            port=int(os.getenv("DB_PORT", "5432")),
+            connect_timeout=10
+        )
+        logging.info("✅ Database connection pool initialized (1-10 connections)")
+
+
+@contextmanager
 def get_db_connection():
-    """Create and return a Postgres database connection."""
-    return psycopg2.connect(
-        host=os.getenv("DB_HOST"),
-        database=os.getenv("DB_NAME", "meetingmind"),
-        user=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASSWORD"),
-        port=int(os.getenv("DB_PORT", "5432")),
-        connect_timeout=10
-    )
+    """Get a connection from the pool (context manager for auto-return).
+
+    Usage:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            # ... do work
+
+    The connection is automatically returned to the pool when the context exits.
+    """
+    _initialize_pool()
+    conn = _connection_pool.getconn()
+    try:
+        yield conn
+    finally:
+        _connection_pool.putconn(conn)
 
 
 # ── MEETINGS ──────────────────────────────────────────────────
@@ -44,37 +74,36 @@ def save_meeting(tool_context: ToolContext, transcript: str, summary: str, meeti
         dict with status and meeting_id.
     """
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        meeting_id = str(uuid.uuid4())
-        session_id = tool_context.state.get("session_id", "default")
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            meeting_id = str(uuid.uuid4())
+            session_id = tool_context.state.get("session_id", "default")
 
-        # Extract meeting title from transcript if not provided
-        if not meeting_title:
-            # Look for "Meeting Title:" pattern in transcript
-            for line in transcript.split('\n')[:10]:  # Check first 10 lines
-                if 'Meeting Title:' in line or 'Title:' in line:
-                    meeting_title = line.split(':', 1)[1].strip()
-                    break
-
-            # If still not found, use first line or default
+            # Extract meeting title from transcript if not provided
             if not meeting_title:
-                first_line = transcript.split('\n')[0].strip()
-                meeting_title = first_line[:100] if len(first_line) > 10 else "Untitled Meeting"
+                # Look for "Meeting Title:" pattern in transcript
+                for line in transcript.split('\n')[:10]:  # Check first 10 lines
+                    if 'Meeting Title:' in line or 'Title:' in line:
+                        meeting_title = line.split(':', 1)[1].strip()
+                        break
 
-        cur.execute(
-            """INSERT INTO meetings (id, transcript, summary, session_id, created_at)
-               VALUES (%s, %s, %s, %s, %s)""",
-            (meeting_id, transcript, summary, session_id, datetime.utcnow())
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
+                # If still not found, use first line or default
+                if not meeting_title:
+                    first_line = transcript.split('\n')[0].strip()
+                    meeting_title = first_line[:100] if len(first_line) > 10 else "Untitled Meeting"
 
-        tool_context.state["current_meeting_id"] = meeting_id
-        tool_context.state["current_meeting_title"] = meeting_title
-        logging.info(f"Meeting saved: {meeting_id} - {meeting_title}")
-        return {"status": "success", "meeting_id": meeting_id, "meeting_title": meeting_title}
+            cur.execute(
+                """INSERT INTO meetings (id, transcript, summary, session_id, created_at)
+                   VALUES (%s, %s, %s, %s, %s)""",
+                (meeting_id, transcript, summary, session_id, datetime.utcnow())
+            )
+            conn.commit()
+            cur.close()
+
+            tool_context.state["current_meeting_id"] = meeting_id
+            tool_context.state["current_meeting_title"] = meeting_title
+            logging.info(f"Meeting saved: {meeting_id} - {meeting_title}")
+            return {"status": "success", "meeting_id": meeting_id, "meeting_title": meeting_title}
 
     except Exception as e:
         logging.error(f"Error saving meeting: {e}")
@@ -98,40 +127,39 @@ def save_tasks(tool_context: ToolContext, tasks_json: str) -> dict:
         if not isinstance(tasks, list):
             tasks = [tasks]
 
-        conn = get_db_connection()
-        cur = conn.cursor()
-        meeting_id = tool_context.state.get("current_meeting_id")
-        saved_ids = []
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            meeting_id = tool_context.state.get("current_meeting_id")
+            saved_ids = []
 
-        for task in tasks:
-            task_id = str(uuid.uuid4())
-            cur.execute(
-                """INSERT INTO tasks
-                   (id, meeting_id, task_name, owner, deadline, priority, status, created_at)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-                (
-                    task_id,
-                    meeting_id,
-                    task.get("task", task.get("task_name", "Unnamed task")),
-                    task.get("owner", "Unassigned"),
-                    task.get("deadline", "Not specified"),
-                    task.get("priority", "Medium"),
-                    "Pending",
-                    datetime.utcnow()
+            for task in tasks:
+                task_id = str(uuid.uuid4())
+                cur.execute(
+                    """INSERT INTO tasks
+                       (id, meeting_id, task_name, owner, deadline, priority, status, created_at)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (
+                        task_id,
+                        meeting_id,
+                        task.get("task", task.get("task_name", "Unnamed task")),
+                        task.get("owner", "Unassigned"),
+                        task.get("deadline", "Not specified"),
+                        task.get("priority", "Medium"),
+                        "Pending",
+                        datetime.utcnow()
+                    )
                 )
-            )
-            saved_ids.append(task_id)
+                saved_ids.append(task_id)
 
-        conn.commit()
-        cur.close()
-        conn.close()
+            conn.commit()
+            cur.close()
 
-        logging.info(f"Saved {len(saved_ids)} tasks to DB")
-        return {
-            "status": "success",
-            "tasks_saved": len(saved_ids),
-            "task_ids": saved_ids
-        }
+            logging.info(f"Saved {len(saved_ids)} tasks to DB")
+            return {
+                "status": "success",
+                "tasks_saved": len(saved_ids),
+                "task_ids": saved_ids
+            }
 
     except Exception as e:
         logging.error(f"Error saving tasks: {e}")
@@ -149,33 +177,32 @@ def check_duplicate_tasks(tool_context: ToolContext, task_name: str) -> dict:
         dict with is_duplicate flag and existing task details if found.
     """
     try:
-        conn = get_db_connection()
-        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        with get_db_connection() as conn:
+            cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
 
-        # Check for similar task name (partial match, case-insensitive)
-        search_term = task_name[:40].strip()
-        cur.execute(
-            """SELECT id, task_name, owner, status, priority
-               FROM tasks
-               WHERE LOWER(task_name) LIKE LOWER(%s)
-                 AND status NOT IN ('Done', 'Cancelled')
-               LIMIT 1""",
-            (f"%{search_term}%",)
-        )
-        result = cur.fetchone()
-        cur.close()
-        conn.close()
+            # Check for similar task name (partial match, case-insensitive)
+            search_term = task_name[:40].strip()
+            cur.execute(
+                """SELECT id, task_name, owner, status, priority
+                   FROM tasks
+                   WHERE LOWER(task_name) LIKE LOWER(%s)
+                     AND status NOT IN ('Done', 'Cancelled')
+                   LIMIT 1""",
+                (f"%{search_term}%",)
+            )
+            result = cur.fetchone()
+            cur.close()
 
-        if result:
-            existing = dict(result)
-            logging.info(f"Duplicate found for '{task_name}': {existing['task_name']}")
-            return {
-                "is_duplicate": True,
-                "existing_task": existing,
-                "message": f"Similar task already exists: '{existing['task_name']}' ({existing['status']})"
-            }
+            if result:
+                existing = dict(result)
+                logging.info(f"Duplicate found for '{task_name}': {existing['task_name']}")
+                return {
+                    "is_duplicate": True,
+                    "existing_task": existing,
+                    "message": f"Similar task already exists: '{existing['task_name']}' ({existing['status']})"
+                }
 
-        return {"is_duplicate": False, "message": "No duplicate found"}
+            return {"is_duplicate": False, "message": "No duplicate found"}
 
     except Exception as e:
         logging.error(f"Error checking duplicates: {e}")
@@ -196,55 +223,54 @@ def get_meetings_with_task_counts(
         dict with list of meetings and their task counts.
     """
     try:
-        conn = get_db_connection()
-        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        with get_db_connection() as conn:
+            cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
 
-        # Build query to get meetings with task counts
-        if status:
-            query = """
-                SELECT m.id, m.summary, m.created_at, COUNT(t.id) as task_count
-                FROM meetings m
-                LEFT JOIN tasks t ON m.id = t.meeting_id AND t.status = %s
-                GROUP BY m.id, m.summary, m.created_at
-                HAVING COUNT(t.id) > 0
-                ORDER BY m.created_at DESC
-                LIMIT 10
-            """
-            params = (status,)
-        else:
-            query = """
-                SELECT m.id, m.summary, m.created_at, COUNT(t.id) as task_count
-                FROM meetings m
-                LEFT JOIN tasks t ON m.id = t.meeting_id AND t.status != 'Done'
-                GROUP BY m.id, m.summary, m.created_at
-                HAVING COUNT(t.id) > 0
-                ORDER BY m.created_at DESC
-                LIMIT 10
-            """
-            params = ()
+            # Build query to get meetings with task counts
+            if status:
+                query = """
+                    SELECT m.id, m.summary, m.created_at, COUNT(t.id) as task_count
+                    FROM meetings m
+                    LEFT JOIN tasks t ON m.id = t.meeting_id AND t.status = %s
+                    GROUP BY m.id, m.summary, m.created_at
+                    HAVING COUNT(t.id) > 0
+                    ORDER BY m.created_at DESC
+                    LIMIT 10
+                """
+                params = (status,)
+            else:
+                query = """
+                    SELECT m.id, m.summary, m.created_at, COUNT(t.id) as task_count
+                    FROM meetings m
+                    LEFT JOIN tasks t ON m.id = t.meeting_id AND t.status != 'Done'
+                    GROUP BY m.id, m.summary, m.created_at
+                    HAVING COUNT(t.id) > 0
+                    ORDER BY m.created_at DESC
+                    LIMIT 10
+                """
+                params = ()
 
-        cur.execute(query, params)
-        meetings = [dict(row) for row in cur.fetchall()]
+            cur.execute(query, params)
+            meetings = [dict(row) for row in cur.fetchall()]
 
-        # Extract meeting title from summary (first line)
-        for m in meetings:
-            summary = m.get('summary', '')
-            # Take first sentence or first 80 chars as title
-            title = summary.split('.')[0].strip()[:80] if summary else "Untitled Meeting"
-            m['meeting_title'] = title
+            # Extract meeting title from summary (first line)
+            for m in meetings:
+                summary = m.get('summary', '')
+                # Take first sentence or first 80 chars as title
+                title = summary.split('.')[0].strip()[:80] if summary else "Untitled Meeting"
+                m['meeting_title'] = title
 
-            # Serialize datetime
-            if hasattr(m.get('created_at'), 'isoformat'):
-                m['created_at'] = m['created_at'].isoformat()
+                # Serialize datetime
+                if hasattr(m.get('created_at'), 'isoformat'):
+                    m['created_at'] = m['created_at'].isoformat()
 
-        cur.close()
-        conn.close()
+            cur.close()
 
-        return {
-            "status": "success",
-            "meetings": meetings,
-            "count": len(meetings)
-        }
+            return {
+                "status": "success",
+                "meetings": meetings,
+                "count": len(meetings)
+            }
 
     except Exception as e:
         logging.error(f"Error getting meetings: {e}")
@@ -271,47 +297,46 @@ def get_pending_tasks(
         dict with list of tasks and count.
     """
     try:
-        conn = get_db_connection()
-        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        with get_db_connection() as conn:
+            cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
 
-        query = "SELECT t.*, m.summary as meeting_summary FROM tasks t LEFT JOIN meetings m ON t.meeting_id = m.id WHERE 1=1"
-        params = []
+            query = "SELECT t.*, m.summary as meeting_summary FROM tasks t LEFT JOIN meetings m ON t.meeting_id = m.id WHERE 1=1"
+            params = []
 
-        if status:
-            query += " AND t.status = %s"
-            params.append(status)
-        else:
-            query += " AND t.status != 'Done'"
+            if status:
+                query += " AND t.status = %s"
+                params.append(status)
+            else:
+                query += " AND t.status != 'Done'"
 
-        if owner:
-            query += " AND LOWER(t.owner) LIKE LOWER(%s)"
-            params.append(f"%{owner}%")
+            if owner:
+                query += " AND LOWER(t.owner) LIKE LOWER(%s)"
+                params.append(f"%{owner}%")
 
-        if priority:
-            query += " AND t.priority = %s"
-            params.append(priority)
+            if priority:
+                query += " AND t.priority = %s"
+                params.append(priority)
 
-        if meeting_id:
-            query += " AND t.meeting_id = %s"
-            params.append(meeting_id)
+            if meeting_id:
+                query += " AND t.meeting_id = %s"
+                params.append(meeting_id)
 
-        query += " ORDER BY t.priority = 'High' DESC, t.created_at DESC LIMIT 20"
+            query += " ORDER BY t.priority = 'High' DESC, t.created_at DESC LIMIT 20"
 
-        cur.execute(query, params)
-        tasks = [dict(row) for row in cur.fetchall()]
+            cur.execute(query, params)
+            tasks = [dict(row) for row in cur.fetchall()]
 
-        # Serialize datetime objects
-        for t in tasks:
-            for k, v in t.items():
-                if hasattr(v, "isoformat"):
-                    t[k] = v.isoformat()
-                elif v is None:
-                    t[k] = ""
+            # Serialize datetime objects
+            for t in tasks:
+                for k, v in t.items():
+                    if hasattr(v, "isoformat"):
+                        t[k] = v.isoformat()
+                    elif v is None:
+                        t[k] = ""
 
-        cur.close()
-        conn.close()
+            cur.close()
 
-        return {"status": "success", "tasks": tasks, "count": len(tasks)}
+            return {"status": "success", "tasks": tasks, "count": len(tasks)}
 
     except Exception as e:
         logging.error(f"Error getting tasks: {e}")
@@ -341,37 +366,36 @@ def update_task_status(
                 "message": f"Invalid status. Must be one of: {valid_statuses}"
             }
 
-        conn = get_db_connection()
-        cur = conn.cursor()
+        with get_db_connection() as conn:
+            cur = conn.cursor()
 
-        cur.execute(
-            """UPDATE tasks
-               SET status = %s
-               WHERE LOWER(task_name) LIKE LOWER(%s)
-                 AND status != 'Done'
-               RETURNING id, task_name, status""",
-            (new_status, f"%{task_name[:40]}%")
-        )
-        updated = cur.fetchall()
-        conn.commit()
-        cur.close()
-        conn.close()
+            cur.execute(
+                """UPDATE tasks
+                   SET status = %s
+                   WHERE LOWER(task_name) LIKE LOWER(%s)
+                     AND status != 'Done'
+                   RETURNING id, task_name, status""",
+                (new_status, f"%{task_name[:40]}%")
+            )
+            updated = cur.fetchall()
+            conn.commit()
+            cur.close()
 
-        if updated:
-            updated_names = [r[1] for r in updated]
-            logging.info(f"Updated {len(updated)} tasks to '{new_status}': {updated_names}")
+            if updated:
+                updated_names = [r[1] for r in updated]
+                logging.info(f"Updated {len(updated)} tasks to '{new_status}': {updated_names}")
+                return {
+                    "status": "success",
+                    "updated_count": len(updated),
+                    "updated_tasks": updated_names,
+                    "new_status": new_status,
+                    "message": f"{len(updated)} task(s) marked as {new_status}"
+                }
+
             return {
-                "status": "success",
-                "updated_count": len(updated),
-                "updated_tasks": updated_names,
-                "new_status": new_status,
-                "message": f"{len(updated)} task(s) marked as {new_status}"
+                "status": "not_found",
+                "message": f"No active task found matching '{task_name}'"
             }
-
-        return {
-            "status": "not_found",
-            "message": f"No active task found matching '{task_name}'"
-        }
 
     except Exception as e:
         logging.error(f"Error updating task status: {e}")
@@ -392,22 +416,21 @@ def save_note(tool_context: ToolContext, title: str, content: str) -> dict:
         dict with status and note_id.
     """
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        note_id = str(uuid.uuid4())
-        meeting_id = tool_context.state.get("current_meeting_id")
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            note_id = str(uuid.uuid4())
+            meeting_id = tool_context.state.get("current_meeting_id")
 
-        cur.execute(
-            """INSERT INTO notes (id, title, content, meeting_id, created_at)
-               VALUES (%s, %s, %s, %s, %s)""",
-            (note_id, title[:500], content, meeting_id, datetime.utcnow())
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
+            cur.execute(
+                """INSERT INTO notes (id, title, content, meeting_id, created_at)
+                   VALUES (%s, %s, %s, %s, %s)""",
+                (note_id, title[:500], content, meeting_id, datetime.utcnow())
+            )
+            conn.commit()
+            cur.close()
 
-        logging.info(f"Note saved: {title[:50]}")
-        return {"status": "success", "note_id": note_id, "title": title}
+            logging.info(f"Note saved: {title[:50]}")
+            return {"status": "success", "note_id": note_id, "title": title}
 
     except Exception as e:
         logging.error(f"Error saving note: {e}")
@@ -425,33 +448,32 @@ def search_notes(tool_context: ToolContext, query: str) -> dict:
         dict with matching notes list.
     """
     try:
-        conn = get_db_connection()
-        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        with get_db_connection() as conn:
+            cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
 
-        search = f"%{query}%"
-        cur.execute(
-            """SELECT id, title, content, created_at
-               FROM notes
-               WHERE LOWER(content) LIKE LOWER(%s)
-                  OR LOWER(title)   LIKE LOWER(%s)
-               ORDER BY created_at DESC
-               LIMIT 5""",
-            (search, search)
-        )
-        notes = [dict(row) for row in cur.fetchall()]
+            search = f"%{query}%"
+            cur.execute(
+                """SELECT id, title, content, created_at
+                   FROM notes
+                   WHERE LOWER(content) LIKE LOWER(%s)
+                      OR LOWER(title)   LIKE LOWER(%s)
+                   ORDER BY created_at DESC
+                   LIMIT 5""",
+                (search, search)
+            )
+            notes = [dict(row) for row in cur.fetchall()]
 
-        for n in notes:
-            for k, v in n.items():
-                if hasattr(v, "isoformat"):
-                    n[k] = v.isoformat()
-            # Truncate long content for readability
-            if len(n.get("content", "")) > 300:
-                n["content"] = n["content"][:300] + "..."
+            for n in notes:
+                for k, v in n.items():
+                    if hasattr(v, "isoformat"):
+                        n[k] = v.isoformat()
+                # Truncate long content for readability
+                if len(n.get("content", "")) > 300:
+                    n["content"] = n["content"][:300] + "..."
 
-        cur.close()
-        conn.close()
+            cur.close()
 
-        return {"status": "success", "notes": notes, "count": len(notes)}
+            return {"status": "success", "notes": notes, "count": len(notes)}
 
     except Exception as e:
         logging.error(f"Error searching notes: {e}")
@@ -472,30 +494,29 @@ def save_memory(tool_context: ToolContext, key: str, value: str) -> dict:
         dict confirming the memory was saved.
     """
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        memory_id = str(uuid.uuid4())
-        session_id = tool_context.state.get("session_id", "default")
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            memory_id = str(uuid.uuid4())
+            session_id = tool_context.state.get("session_id", "default")
 
-        cur.execute(
-            """INSERT INTO memory (id, session_id, key, value, created_at)
-               VALUES (%s, %s, %s, %s, %s)
-               ON CONFLICT (session_id, key)
-               DO UPDATE SET value = EXCLUDED.value,
-                             created_at = EXCLUDED.created_at""",
-            (memory_id, session_id, key.lower().replace(" ", "_"), value, datetime.utcnow())
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
+            cur.execute(
+                """INSERT INTO memory (id, session_id, key, value, created_at)
+                   VALUES (%s, %s, %s, %s, %s)
+                   ON CONFLICT (session_id, key)
+                   DO UPDATE SET value = EXCLUDED.value,
+                                 created_at = EXCLUDED.created_at""",
+                (memory_id, session_id, key.lower().replace(" ", "_"), value, datetime.utcnow())
+            )
+            conn.commit()
+            cur.close()
 
-        logging.info(f"Memory saved: {key} = {value[:50]}")
-        return {
-            "status": "success",
-            "key": key,
-            "value": value,
-            "message": f"Remembered: {key}"
-        }
+            logging.info(f"Memory saved: {key} = {value[:50]}")
+            return {
+                "status": "success",
+                "key": key,
+                "value": value,
+                "message": f"Remembered: {key}"
+            }
 
     except Exception as e:
         logging.error(f"Error saving memory: {e}")
@@ -513,35 +534,34 @@ def get_memory(tool_context: ToolContext, key: Optional[str] = None) -> dict:
         dict with memories list.
     """
     try:
-        conn = get_db_connection()
-        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-        session_id = tool_context.state.get("session_id", "default")
+        with get_db_connection() as conn:
+            cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+            session_id = tool_context.state.get("session_id", "default")
 
-        if key:
-            cur.execute(
-                """SELECT key, value, created_at FROM memory
-                   WHERE session_id = %s AND key = %s""",
-                (session_id, key.lower().replace(" ", "_"))
-            )
-        else:
-            cur.execute(
-                """SELECT key, value, created_at FROM memory
-                   WHERE session_id = %s
-                   ORDER BY created_at DESC
-                   LIMIT 20""",
-                (session_id,)
-            )
+            if key:
+                cur.execute(
+                    """SELECT key, value, created_at FROM memory
+                       WHERE session_id = %s AND key = %s""",
+                    (session_id, key.lower().replace(" ", "_"))
+                )
+            else:
+                cur.execute(
+                    """SELECT key, value, created_at FROM memory
+                       WHERE session_id = %s
+                       ORDER BY created_at DESC
+                       LIMIT 20""",
+                    (session_id,)
+                )
 
-        memories = [dict(row) for row in cur.fetchall()]
-        for m in memories:
-            for k, v in m.items():
-                if hasattr(v, "isoformat"):
-                    m[k] = v.isoformat()
+            memories = [dict(row) for row in cur.fetchall()]
+            for m in memories:
+                for k, v in m.items():
+                    if hasattr(v, "isoformat"):
+                        m[k] = v.isoformat()
 
-        cur.close()
-        conn.close()
+            cur.close()
 
-        return {"status": "success", "memories": memories, "count": len(memories)}
+            return {"status": "success", "memories": memories, "count": len(memories)}
 
     except Exception as e:
         logging.error(f"Error getting memory: {e}")

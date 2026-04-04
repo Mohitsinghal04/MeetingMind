@@ -173,20 +173,21 @@ def find_meeting_by_title(tool_context: ToolContext, meeting_title: str) -> dict
     import psycopg2.extras
 
     try:
-        with get_db_connection() as conn:
-            cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
 
-            # Search in summary (case-insensitive partial match)
-            cur.execute(
-                """SELECT id, summary, created_at
-                   FROM meetings
-                   WHERE LOWER(summary) LIKE LOWER(%s)
-                   ORDER BY created_at DESC
-                   LIMIT 5""",
-                (f"%{meeting_title}%",)
-            )
-            meetings = [dict(row) for row in cur.fetchall()]
-            cur.close()
+        # Search in summary (case-insensitive partial match)
+        cur.execute(
+            """SELECT id, summary, created_at
+               FROM meetings
+               WHERE LOWER(summary) LIKE LOWER(%s)
+               ORDER BY created_at DESC
+               LIMIT 5""",
+            (f"%{meeting_title}%",)
+        )
+        meetings = [dict(row) for row in cur.fetchall()]
+        cur.close()
+        conn.close()
 
         if not meetings:
             return {

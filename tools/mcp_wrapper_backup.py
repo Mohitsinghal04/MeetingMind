@@ -25,29 +25,19 @@ logging.info("🔧 MCP Integration Layer initialized (calls routed through MCP-c
 # MCP-COMPATIBLE TASK OPERATIONS
 # ══════════════════════════════════════════════════════════════
 
-def save_tasks_mcp(tool_context: ToolContext, tasks_json: str, skip_duplicate_check: bool = False) -> dict:
-    """Save tasks via MCP-compatible interface with duplicate checking.
+def save_tasks_mcp(tool_context: ToolContext, tasks_json: str) -> dict:
+    """Save tasks via MCP-compatible interface.
 
     Architecture: ADK Agent → MCP Wrapper → Database
     This demonstrates the MCP pattern for hackathon judges.
-
-    Args:
-        tool_context: ADK tool context.
-        tasks_json: JSON string array of tasks.
-        skip_duplicate_check: If True, skip duplicate checking. Default False.
-
-    Returns:
-        dict with save results including duplicate detection info.
     """
-    logging.info("🔧 [MCP Layer] save_tasks called → routing to database with duplicate check")
+    logging.info("🔧 [MCP Layer] save_tasks called → routing to database")
 
-    result = db_save_tasks(tool_context, tasks_json, skip_duplicate_check)
+    result = db_save_tasks(tool_context, tasks_json)
     result["mcp_layer"] = "MCP-compatible interface"
     result["architecture"] = "Agent → MCP Wrapper → PostgreSQL"
 
-    tasks_saved = result.get('tasks_saved', 0)
-    tasks_skipped = result.get('tasks_skipped', 0)
-    logging.info(f"✅ [MCP Layer] save_tasks completed → {tasks_saved} saved, {tasks_skipped} duplicates skipped")
+    logging.info(f"✅ [MCP Layer] save_tasks completed → {result.get('tasks_saved', 0)} tasks saved")
     return result
 
 
