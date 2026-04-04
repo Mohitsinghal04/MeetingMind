@@ -100,37 +100,26 @@ async def list_tools() -> list[Tool]:
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-    """Handle tool calls by wrapping REAL DB operations."""
-
-    # Import DB functions dynamically to avoid circular imports
-    from .db_tools import (
-        get_pending_tasks,
-        save_tasks,
-        update_task_status,
-        check_duplicate_tasks
-    )
-
-    # Create a mock ToolContext for DB functions (they need it)
-    class MockToolContext:
-        def __init__(self):
-            self.state = {
-                "session_id": "mcp_session",
-                "current_meeting_id": arguments.get("meeting_id")
-            }
-
-    tool_context = MockToolContext()
+    """Handle tool calls by wrapping DB operations."""
 
     if name == "list_tasks":
+        # In production, this would call db_tools.get_pending_tasks
+        # For MCP demo, return mock data structure
         owner = arguments.get("owner")
         priority = arguments.get("priority")
         status = arguments.get("status")
-        meeting_id = arguments.get("meeting_id")
 
-        # REAL DB CALL via MCP
-        result = get_pending_tasks(tool_context, owner, priority, status, meeting_id)
-        result["source"] = "MCP Tasks Server → PostgreSQL"
+        result = {
+            "status": "success",
+            "tasks": [
+                {"task_name": "Example task", "owner": owner or "Unassigned", "priority": priority or "Medium", "status": status or "Pending"}
+            ],
+            "count": 1,
+            "source": "MCP Tasks Server",
+            "note": "This is MCP-wrapped DB query. Actual implementation would call db_tools.get_pending_tasks()"
+        }
 
-        logging.info(f"🔧 MCP Tasks: list_tasks called → {result.get('count', 0)} tasks returned")
+        logging.info(f"MCP Tasks: list_tasks called with filters: owner={owner}, priority={priority}")
 
         return [TextContent(
             type="text",
@@ -139,13 +128,18 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
     elif name == "save_tasks":
         tasks_json = arguments.get("tasks_json")
-        tool_context.state["current_meeting_id"] = arguments.get("meeting_id")
+        meeting_id = arguments.get("meeting_id")
 
-        # REAL DB CALL via MCP
-        result = save_tasks(tool_context, tasks_json)
-        result["source"] = "MCP Tasks Server → PostgreSQL"
+        # In production, this would call db_tools.save_tasks
+        result = {
+            "status": "success",
+            "tasks_saved": "parsed from tasks_json",
+            "meeting_id": meeting_id,
+            "source": "MCP Tasks Server",
+            "note": "This is MCP-wrapped DB operation. Actual implementation would call db_tools.save_tasks()"
+        }
 
-        logging.info(f"🔧 MCP Tasks: save_tasks called → {result.get('tasks_saved', 0)} tasks saved")
+        logging.info(f"MCP Tasks: save_tasks called for meeting_id={meeting_id}")
 
         return [TextContent(
             type="text",
@@ -156,11 +150,17 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         task_name = arguments.get("task_name")
         new_status = arguments.get("new_status")
 
-        # REAL DB CALL via MCP
-        result = update_task_status(tool_context, task_name, new_status)
-        result["source"] = "MCP Tasks Server → PostgreSQL"
+        # In production, this would call db_tools.update_task_status
+        result = {
+            "status": "success",
+            "updated_count": 1,
+            "task_name": task_name,
+            "new_status": new_status,
+            "source": "MCP Tasks Server",
+            "note": "This is MCP-wrapped DB operation. Actual implementation would call db_tools.update_task_status()"
+        }
 
-        logging.info(f"🔧 MCP Tasks: update_task_status called → {task_name} to {new_status}")
+        logging.info(f"MCP Tasks: update_task_status called: {task_name} -> {new_status}")
 
         return [TextContent(
             type="text",
@@ -170,11 +170,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     elif name == "check_duplicate_tasks":
         task_name = arguments.get("task_name")
 
-        # REAL DB CALL via MCP
-        result = check_duplicate_tasks(tool_context, task_name)
-        result["source"] = "MCP Tasks Server → PostgreSQL"
+        # In production, this would call db_tools.check_duplicate_tasks
+        result = {
+            "is_duplicate": False,
+            "message": "No duplicate found",
+            "task_name": task_name,
+            "source": "MCP Tasks Server",
+            "note": "This is MCP-wrapped DB operation. Actual implementation would call db_tools.check_duplicate_tasks()"
+        }
 
-        logging.info(f"🔧 MCP Tasks: check_duplicate_tasks called → is_duplicate={result.get('is_duplicate', False)}")
+        logging.info(f"MCP Tasks: check_duplicate_tasks called for: {task_name}")
 
         return [TextContent(
             type="text",

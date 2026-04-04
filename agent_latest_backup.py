@@ -24,20 +24,16 @@ from google.adk.tools.tool_context import ToolContext
 
 from .tools.db_tools import (
     save_meeting,
+    save_tasks,
     check_duplicate_tasks,
     get_pending_tasks,
+    update_task_status,
+    save_note,
+    search_notes,
     save_memory,
     get_memory,
 )
-# MCP-compatible imports (HACKATHON DEMO - routes through MCP wrapper layer)
-from .tools.mcp_wrapper import (
-    save_tasks_mcp as save_tasks,
-    update_task_status_mcp as update_task_status,
-    save_note_mcp as save_note,
-    search_notes_mcp as search_notes,
-    create_calendar_event_mcp as create_calendar_event,
-)
-from .tools.calendar_tools import get_available_slots
+from .tools.calendar_tools import create_calendar_event, get_available_slots
 from .tools.task_tools import list_my_tasks, mark_task_done, mark_task_in_progress, find_meeting_by_title
 from .tools.notes_tools import search_related_notes, save_meeting_note
 
@@ -54,34 +50,6 @@ load_dotenv()
 model_name = os.getenv("MODEL", "gemini-2.5-flash")
 
 
-# ── STATE MANAGEMENT ──────────────────────────────────────────
-
-# Centralized state defaults (Issue 7 fix)
-_STATE_DEFAULTS = {
-    "TRANSCRIPT": "",
-    "session_id": "session_default",
-    "db_result": {"tasks_saved": 0, "status": "pending"},
-    "user_query": "",
-    "user_command": "",
-    "memory_input": "",
-    "current_meeting_id": None,
-    "current_meeting_title": None,
-    "meeting_summary": "",
-    "prioritized_tasks": "",
-    "scheduled_events": "",
-    "notes_result": {},
-    "memory_result": {},
-    "final_briefing": ""
-}
-
-
-def _ensure_state_defaults(tool_context: ToolContext) -> None:
-    """Initialize all state variables to prevent KeyError in sub-agents."""
-    for key, default_value in _STATE_DEFAULTS.items():
-        if key not in tool_context.state:
-            tool_context.state[key] = default_value
-
-
 # ── STATE TOOL ────────────────────────────────────────────────
 
 def save_transcript_to_state(tool_context: ToolContext, transcript: str) -> dict:
@@ -94,11 +62,15 @@ def save_transcript_to_state(tool_context: ToolContext, transcript: str) -> dict
     Returns:
         dict confirming the transcript was saved and prompting delegation.
     """
-    _ensure_state_defaults(tool_context)
-
     tool_context.state["TRANSCRIPT"] = transcript
     session_id = getattr(tool_context, "session_id", None) or "session_default"
     tool_context.state["session_id"] = session_id
+
+    # Pre-initialize ALL state variables to prevent KeyError in sub-agents
+    tool_context.state["db_result"] = {"tasks_saved": 0, "status": "pending"}
+    tool_context.state["user_query"] = ""        # For query_agent
+    tool_context.state["user_command"] = ""      # For execution_agent
+    tool_context.state["memory_input"] = ""      # For memory_store_agent
 
     logging.info(f"Transcript saved to state ({len(transcript)} chars)")
     return {
@@ -119,7 +91,17 @@ def set_user_query(tool_context: ToolContext, query: str) -> dict:
     Returns:
         dict confirming query was saved.
     """
-    _ensure_state_defaults(tool_context)
+    # Pre-initialize ALL state variables if not already set
+    if "TRANSCRIPT" not in tool_context.state:
+        tool_context.state["TRANSCRIPT"] = ""
+    if "user_command" not in tool_context.state:
+        tool_context.state["user_command"] = ""
+    if "memory_input" not in tool_context.state:
+        tool_context.state["memory_input"] = ""
+    if "db_result" not in tool_context.state:
+        tool_context.state["db_result"] = {"tasks_saved": 0, "status": "pending"}
+
+    # Set the actual query
     tool_context.state["user_query"] = query
     return {"status": "success", "query": query}
 
@@ -134,7 +116,17 @@ def set_user_command(tool_context: ToolContext, command: str) -> dict:
     Returns:
         dict confirming command was saved.
     """
-    _ensure_state_defaults(tool_context)
+    # Pre-initialize ALL state variables if not already set
+    if "TRANSCRIPT" not in tool_context.state:
+        tool_context.state["TRANSCRIPT"] = ""
+    if "user_query" not in tool_context.state:
+        tool_context.state["user_query"] = ""
+    if "memory_input" not in tool_context.state:
+        tool_context.state["memory_input"] = ""
+    if "db_result" not in tool_context.state:
+        tool_context.state["db_result"] = {"tasks_saved": 0, "status": "pending"}
+
+    # Set the actual command
     tool_context.state["user_command"] = command
     return {"status": "success", "command": command}
 
@@ -149,7 +141,17 @@ def set_memory_input(tool_context: ToolContext, information: str) -> dict:
     Returns:
         dict confirming memory input was saved.
     """
-    _ensure_state_defaults(tool_context)
+    # Pre-initialize ALL state variables if not already set
+    if "TRANSCRIPT" not in tool_context.state:
+        tool_context.state["TRANSCRIPT"] = ""
+    if "user_query" not in tool_context.state:
+        tool_context.state["user_query"] = ""
+    if "user_command" not in tool_context.state:
+        tool_context.state["user_command"] = ""
+    if "db_result" not in tool_context.state:
+        tool_context.state["db_result"] = {"tasks_saved": 0, "status": "pending"}
+
+    # Set the actual memory input
     tool_context.state["memory_input"] = information
     return {"status": "success", "information": information}
 
@@ -517,26 +519,7 @@ Format the clarification nicely:
 
 Which would you like to see?
 
-HANDLING USER'S CLARIFICATION RESPONSE:
-When user responds to the clarification menu, check what they want:
-
-- If they say "all", "all tasks", "both", "both meetings", "everything", "show all", "option 1", or "1":
-  → They want ALL tasks from ALL meetings
-  → Call list_my_tasks(force_show_all=True)
-  → The force_show_all parameter bypasses clarification and shows everything
-  → Example: list_my_tasks(force_show_all=True) or list_my_tasks(status="Pending", force_show_all=True)
-
-- If they mention a specific meeting name (e.g. "Q3 Planning", "Sprint 12"):
-  → Use find_meeting_by_title to get meeting_id
-  → Then call list_my_tasks(meeting_id=result)
-
-- If they say "option 2", "option 3", or refer to a numbered choice:
-  → Look at the meeting_options from the clarification result
-  → Option 1 = all tasks (use force_show_all=True)
-  → Option 2+ = specific meeting (use that meeting_id)
-
-CRITICAL: When user wants "all tasks", you MUST use force_show_all=True parameter.
-This tells the function to skip the clarification menu and return all tasks immediately.
+Then wait for user to clarify, and call list_my_tasks again with appropriate meeting_id.
 
 ═══════════════════════════════════════════
 

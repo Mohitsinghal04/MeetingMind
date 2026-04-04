@@ -34,7 +34,7 @@ from .tools.db_tools import (
     get_memory,
 )
 from .tools.calendar_tools import create_calendar_event, get_available_slots
-from .tools.task_tools import list_my_tasks, mark_task_done, mark_task_in_progress
+from .tools.task_tools import list_my_tasks, mark_task_done, mark_task_in_progress, find_meeting_by_title
 from .tools.notes_tools import search_related_notes, save_meeting_note
 
 # ── SETUP ─────────────────────────────────────────────────────
@@ -187,11 +187,11 @@ Return only the summary text. No preamble, no labels, just the summary.
 action_item_priority_agent = Agent(
     name="action_item_priority_agent",
     model=model_name,
-    description="Extracts, prioritizes, and formats action items as beautiful markdown.",
+    description="Extracts and prioritizes action items from meeting summary.",
     instruction="""
-You are a task extraction and presentation expert.
+You are a task extraction and prioritization expert.
 
-Based on MEETING_SUMMARY, extract every action item, assign priority, and format beautifully.
+Based on MEETING_SUMMARY, extract every action item and assign priority.
 
 MEETING_SUMMARY:
 {meeting_summary}
@@ -204,34 +204,16 @@ For each task identify:
 
 Consider deadlines, business impact, and dependencies when assigning priority.
 
-CRITICAL: Your FIRST character must be: ✅
+Format your output as a simple markdown list:
 
-Format your output as beautiful markdown:
-
-✅ **Meeting Processed Successfully**
-
-📋 **Summary:**
-{meeting_summary}
-
-✅ **Action Items:**
+• **High** — [task] — Owner: [owner] — Due: [deadline]
 • **High** — [task] — Owner: [owner] — Due: [deadline]
 • **Medium** — [task] — Owner: [owner] — Due: [deadline]
 • **Low** — [task] — Owner: [owner] — Due: [deadline]
 
-(If no tasks: "No action items identified")
+If no tasks found, output: "No action items identified"
 
-📊 **System Status:**
-✅ Tasks extracted and prioritized
-✅ Calendar events will be created for scheduling tasks (with Google Meet links)
-✅ All data saved to database
-
----
-✨ **What's next?**
-- "What tasks are pending?"
-- "Mark task 1 as done"
-- "Schedule a meeting..."
-
-CRITICAL: Output ONLY markdown. NO JSON. Start with ✅
+Output ONLY the task list. NO headers, NO extra formatting, just the bullet list.
 """,
     output_key="prioritized_tasks"
 )
@@ -244,9 +226,9 @@ CRITICAL: Output ONLY markdown. NO JSON. Start with ✅
 scheduler_agent = Agent(
     name="scheduler_agent",
     model=model_name,
-    description="Creates Google Calendar events with Meet links for scheduling tasks.",
+    description="Creates Google Calendar events (API with calendar link fallback).",
     instruction="""
-You are a calendar scheduling assistant that creates Google Calendar events.
+You are a calendar scheduling assistant with HYBRID event creation capabilities.
 
 PRIORITIZED_TASKS (markdown format):
 {prioritized_tasks}
@@ -272,11 +254,12 @@ If you find a task that needs scheduling:
    - attendees: "john@example.com,sarah@company.com" (comma-separated emails)
    - description: "Scheduled from meeting transcript"
 
-3. After the event is created, check the result:
-   - If meeting_link exists and is not "No Meet link": mention it
-   - If meeting_link is "No Meet link" or similar: don't mention Meet at all
-   - Format: "📅 [Event title] scheduled for [date] at [time]"
-   - Only include Meet link if it's a real URL
+3. The function returns a pre-filled calendar link. Format your output:
+
+   📅 [Event title] - Ready to schedule
+   (Display result["markdown_link"] value here - it's a complete HTML link with target="_blank")
+
+   The link opens Google Calendar in a new tab with all details pre-filled (including attendees). Save the event and send invitations.
 
 If NO tasks need scheduling, return empty string: ""
 
@@ -285,9 +268,9 @@ IMPORTANT:
 - Attendees should be email addresses (use @example.com if only names given)
 - If uncertain about date/time, don't schedule
 - If nothing to schedule, return empty string
-- DON'T say "a real Google Calendar event" - just say "scheduled" or "event created"
+- Display the markdown_link value directly without quotes or modification
 
-Return empty string if no events scheduled, otherwise return simple confirmation.
+Return empty string if no events scheduled, otherwise return formatted confirmation.
 """,
     tools=[create_calendar_event],
     output_key="scheduled_events"
@@ -393,6 +376,7 @@ You are an executive briefing writer who creates beautiful, readable summaries.
 Inputs available:
 MEETING_SUMMARY: {meeting_summary}
 PRIORITIZED_TASKS: {prioritized_tasks}
+SCHEDULED_EVENTS: {scheduled_events}
 DB_RESULT: {db_result}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -419,6 +403,10 @@ Now generate the full markdown summary in this format:
 • **[priority]** — [task] — Owner: [owner] — Due: [deadline]
 
 [If PRIORITIZED_TASKS is empty, write: "No action items identified"]
+
+[If SCHEDULED_EVENTS is not empty, add a section:]
+📅 **Scheduled Events:**
+[Copy the SCHEDULED_EVENTS content directly - it's already formatted]
 
 💾 **System Actions:**
 • [tasks_saved] tasks saved to database
@@ -471,18 +459,52 @@ You are a helpful knowledge retrieval assistant for MeetingMind.
 The user has asked a question. Use your tools to find the answer.
 
 Available tools:
-- list_my_tasks: find tasks (filter by owner, priority, or status: Pending/In Progress/Done/Cancelled)
+- list_my_tasks: find tasks (filter by owner, priority, status, or meeting_id)
+- find_meeting_by_title: search for a meeting by title/keyword to get its meeting_id
 - search_related_notes: search past meeting notes
 - get_memory: retrieve stored information
 
 User question:
 {user_query}
 
-Use 1-2 tools as needed, then provide a clear, direct answer.
+═══════════════════════════════════════════
+INTELLIGENT MEETING-AWARE QUERIES
+═══════════════════════════════════════════
+
+When user asks for tasks and mentions a specific meeting:
+1. Use find_meeting_by_title to get the meeting_id
+2. Then call list_my_tasks with that meeting_id
+
+Examples:
+- "Show pending tasks from Q3 Planning" → find_meeting_by_title("Q3 Planning") → list_my_tasks(meeting_id=result)
+- "List John's tasks from Budget Review" → find_meeting_by_title("Budget Review") → list_my_tasks(owner="John", meeting_id=result)
+
+When user asks for tasks WITHOUT specifying a meeting:
+- Call list_my_tasks normally (no meeting_id)
+- The tool will automatically offer clarification if tasks span multiple meetings
+- If result["status"] == "clarification_needed", the result contains:
+  - total_tasks: total count
+  - meeting_options: list of meetings with task_count and title
+
+Format the clarification nicely:
+
+**I found tasks from N meetings:**
+
+1. **All tasks** (X total)
+2. **Meeting Title 1** (Y tasks)
+3. **Meeting Title 2** (Z tasks)
+
+Which would you like to see?
+
+Then wait for user to clarify, and call list_my_tasks again with appropriate meeting_id.
+
+═══════════════════════════════════════════
+
+Use 1-3 tools as needed, then provide a clear, direct answer.
 Format your response in a readable way.
 If you can't find the information, say so clearly.
 """,
-    tools=[list_my_tasks, search_related_notes, get_memory],
+    tools=[list_my_tasks, find_meeting_by_title, search_related_notes, get_memory],
     output_key="query_result"
 )
 
@@ -551,28 +573,34 @@ CRITICAL for calendar event creation:
    - Email addresses CANNOT be inferred - always ask if not provided
 5. description: Brief note about the meeting (optional)
 
-The system creates Google Calendar events with Google Meet links.
-Events are placed directly on the user's calendar (when CALENDAR_ID is shared).
-
-IMPORTANT: Service accounts CANNOT send email invitations, even with shared calendars.
-Attendee emails are saved in the event description for manual invitation.
+The system generates pre-filled Google Calendar links for creating events.
 
 After executing ANY command, provide a clear confirmation.
 
-For calendar events, check the event result and format appropriately:
+═══════════════════════════════════════════
+CALENDAR EVENT FORMATTING
+═══════════════════════════════════════════
 
-✅ If meeting_link is a real URL (starts with https://meet.google.com):
-**Calendar Event Created**
-📅 [title] - [date] at [time]
-🔗 **Google Meet:** [meeting_link]
-📧 **To invite guests:** Open the event in Google Calendar and click "Add guests" to invite: [attendee_list]
+When create_calendar_event is called, it returns a pre-filled calendar link.
+The result will have method="calendar_link" and a "markdown_link" field.
 
-✅ If meeting_link is "No Meet link" or similar (not a real URL):
-**Calendar Event Created**
-📅 [title] - [date] at [time]
-📧 **To invite guests:** Open the event in Google Calendar, add a Meet link if needed, then click "Add guests" to invite: [attendee_list]
+Format your output:
 
-DO NOT include the Meet line if there's no actual Meet link - it looks incomplete.
+**📅 Calendar Event Ready**
+**[title]** - [date] at [time]
+Attendees: [attendee_list]
+
+(Display result["markdown_link"] here - it's already a complete HTML link with target="_blank")
+
+This link opens Google Calendar in a new tab with all details pre-filled (including attendees in the guest list).
+When you save the event, Google will prompt you to send email invitations to all attendees.
+
+IMPORTANT:
+- Display the markdown_link field value directly from the result
+- Don't add quotes or modify it - output the HTML as-is
+- The link already has target="_blank" to open in new tab
+
+═══════════════════════════════════════════
 """,
     tools=[
         mark_task_done,
@@ -626,12 +654,13 @@ Keep it simple and conversational.
 # action_item_priority_agent outputs markdown, scheduler creates REAL Google Calendar events
 transcript_pipeline = SequentialAgent(
     name="transcript_pipeline",
-    description="Transcript processing with real calendar event creation (4 agents).",
+    description="Transcript processing with real calendar event creation (5 agents).",
     sub_agents=[
         summary_agent,                # 1. Summarize transcript
-        action_item_priority_agent,   # 2. Extract + Prioritize + FORMAT AS MARKDOWN!
-        scheduler_agent,              # 3. Create REAL calendar events with Meet links!
+        action_item_priority_agent,   # 2. Extract + Prioritize tasks
+        scheduler_agent,              # 3. Create calendar events with links
         duplicate_check_agent,        # 4. Save tasks to DB (silent, no output)
+        briefing_agent,               # 5. Assemble all outputs into final markdown
     ]
 )
 

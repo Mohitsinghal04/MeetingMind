@@ -25,15 +25,20 @@ def clear_all_tasks():
 
     cur = conn.cursor()
 
-    # Delete all tasks
+    # Delete all tasks first (due to foreign key constraint)
     cur.execute("DELETE FROM tasks")
-    deleted = cur.rowcount
+    tasks_deleted = cur.rowcount
+
+    # Delete all meetings
+    cur.execute("DELETE FROM meetings")
+    meetings_deleted = cur.rowcount
 
     conn.commit()
     cur.close()
     conn.close()
 
-    print(f"✓ Deleted {deleted} tasks from database")
+    print(f"✓ Deleted {tasks_deleted} tasks from database")
+    print(f"✓ Deleted {meetings_deleted} meetings from database")
     print("Database is now clean for testing")
 
 if __name__ == "__main__":

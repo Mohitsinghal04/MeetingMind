@@ -20,8 +20,7 @@ def list_my_tasks(
     owner: Optional[str] = None,
     priority: Optional[str] = None,
     status: Optional[str] = None,
-    meeting_id: Optional[str] = None,
-    force_show_all: bool = False
+    meeting_id: Optional[str] = None
 ) -> dict:
     """List tasks, optionally filtered by owner, priority, status, or meeting.
 
@@ -31,22 +30,17 @@ def list_my_tasks(
         priority: Filter by priority - High, Medium, or Low.
         status: Filter by status - Pending, In Progress, Done, or Cancelled.
         meeting_id: Filter by specific meeting ID.
-        force_show_all: If True, skip clarification and show all tasks regardless of count.
 
     Returns:
         dict with list of matching tasks, or meeting options if ambiguous.
     """
     # SMART CLARIFICATION: If no meeting_id specified, check if we need to ask
-    # UNLESS force_show_all is True (user explicitly wants everything)
-    if not meeting_id and not force_show_all:
+    if not meeting_id:
         # Get list of meetings that have matching tasks
         meetings_result = get_meetings_with_task_counts(tool_context, status=status)
 
-        logging.info(f"🔍 CLARIFICATION CHECK: meetings_result status={meetings_result.get('status')}, count={meetings_result.get('count', 0)}")
-
         if meetings_result["status"] == "success":
             meetings = meetings_result["meetings"]
-            logging.info(f"🔍 Found {len(meetings)} meetings with tasks")
 
             # If multiple meetings have matching tasks, offer clarification
             if len(meetings) > 1:
@@ -54,22 +48,17 @@ def list_my_tasks(
                 result = get_pending_tasks(tool_context, owner=owner, priority=priority, status=status)
                 total_tasks = result.get("count", 0)
 
-                logging.info(f"🔍 Total tasks: {total_tasks}")
-
                 # If total tasks <= 10, just show them all (no need to clarify)
                 if total_tasks <= 10:
-                    logging.info(f"🔍 Skipping clarification (tasks <= 10)")
                     return _format_task_list(result)
 
                 # Otherwise, offer meeting-based clarification
-                logging.info(f"🔍 Offering clarification menu (tasks > 10)")
                 meeting_options = []
                 total_count = 0
                 for m in meetings:
                     title = m['meeting_title']
                     count = m['task_count']
                     total_count += count
-                    logging.info(f"🔍   Meeting: '{title}' - {count} tasks")
                     meeting_options.append({
                         "meeting_id": m['id'],
                         "title": title,
@@ -77,7 +66,6 @@ def list_my_tasks(
                         "created_at": m.get('created_at', '')
                     })
 
-                logging.info(f"🔍 Returning clarification_needed with {len(meeting_options)} options")
                 return {
                     "status": "clarification_needed",
                     "message": "I found tasks from multiple meetings. Which would you like to see?",
