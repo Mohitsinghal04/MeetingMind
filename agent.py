@@ -28,6 +28,7 @@ from .tools.db_tools import (
     get_pending_tasks,
     save_memory,
     get_memory,
+    get_meeting_summary,
 )
 # MCP-compatible imports (HACKATHON DEMO - routes through MCP wrapper layer)
 from .tools.mcp_wrapper import (
@@ -40,6 +41,7 @@ from .tools.mcp_wrapper import (
 from .tools.calendar_tools import get_available_slots
 from .tools.task_tools import list_my_tasks, mark_task_done, mark_task_in_progress, find_meeting_by_title
 from .tools.notes_tools import search_related_notes, save_meeting_note
+from .tools.date_helpers import parse_relative_date
 
 # ── SETUP ─────────────────────────────────────────────────────
 
@@ -94,7 +96,13 @@ def save_transcript_to_state(tool_context: ToolContext, transcript: str) -> dict
     Returns:
         dict confirming the transcript was saved and prompting delegation.
     """
+    import uuid
     _ensure_state_defaults(tool_context)
+
+    # ADD REQUEST TRACKING for observability
+    request_id = str(uuid.uuid4())[:8]
+    tool_context.state["request_id"] = request_id
+    logging.info(f"📊 [{request_id}] NEW REQUEST: Transcript ({len(transcript)} chars)")
 
     tool_context.state["TRANSCRIPT"] = transcript
     session_id = getattr(tool_context, "session_id", None) or "session_default"
@@ -268,19 +276,34 @@ Your job: Look for tasks that mention scheduling a meeting with a specific date/
 
 If you find a task that needs scheduling:
 1. Extract: title, date, time, attendees (email addresses)
-2. Call create_calendar_event with:
+
+2. USE parse_relative_date TOOL to convert relative dates to absolute YYYY-MM-DD format:
+
+   CRITICAL: Use the parse_relative_date tool for reliable date calculation!
+
+   Example: Task mentions "Schedule design review on Monday at 10am"
+   → Call parse_relative_date(date_string="Monday")
+   → Tool returns: {"date": "2026-04-06", "day_of_week": "Monday"}
+   → Use "2026-04-06" in start_time
+
+   Context: Today is 2026-04-05 (Sunday)
+   The tool handles: "Monday", "Tuesday", "tomorrow", "next week", "April 10th", etc.
+
+3. Call create_calendar_event with:
    - title: "Design Review Meeting"
-   - start_time: "2026-06-15 10:00" (MUST be YYYY-MM-DD HH:MM format)
+   - start_time: "2026-04-07 10:00" (MUST be YYYY-MM-DD HH:MM format)
    - duration_minutes: 60 (default) or parse from task
    - attendees: "john@example.com,sarah@company.com" (comma-separated emails)
    - description: "Scheduled from meeting transcript"
 
-3. The function returns a pre-filled calendar link. Format your output:
+3. The function returns result["calendar_url"]. Format your output with markdown link:
 
-   📅 [Event title] - Ready to schedule
-   (Display result["markdown_link"] value here - it's a complete HTML link with target="_blank")
+   📅 **[Event title]** - [Date] at [Time] IST
+   [Click here to add to Google Calendar]({result["calendar_url"]})
 
-   The link opens Google Calendar in a new tab with all details pre-filled (including attendees). Save the event and send invitations.
+   Example output:
+   📅 **Design Review** - Monday, April 6, 2026 at 10:00 AM IST
+   [Click here to add to Google Calendar](https://calendar.google.com/...)
 
 If NO tasks need scheduling, return empty string: ""
 
@@ -289,11 +312,11 @@ IMPORTANT:
 - Attendees should be email addresses (use @example.com if only names given)
 - If uncertain about date/time, don't schedule
 - If nothing to schedule, return empty string
-- Display the markdown_link value directly without quotes or modification
+- Use markdown link format [text](url), NOT raw HTML
 
 Return empty string if no events scheduled, otherwise return formatted confirmation.
 """,
-    tools=[create_calendar_event],
+    tools=[parse_relative_date, create_calendar_event],
     output_key="scheduled_events"
 )
 
@@ -489,11 +512,36 @@ The user has asked a question. Use your tools to find the answer.
 Available tools:
 - list_my_tasks: find tasks (filter by owner, priority, status, or meeting_id)
 - find_meeting_by_title: search for a meeting by title/keyword to get its meeting_id
+- get_meeting_summary: retrieve the FULL summary of a specific meeting (use for "summarize X meeting" queries)
 - search_related_notes: search past meeting notes
 - get_memory: retrieve stored information
 
 User question:
 {user_query}
+
+═══════════════════════════════════════════
+MEETING SUMMARY QUERIES
+═══════════════════════════════════════════
+
+When user asks for a meeting summary (e.g., "show Q3 Product Planning meeting summary", "summarize Sprint 12 meeting"):
+
+1. Extract keywords (remove "meeting", "summary", filler words)
+   - "show Q3 Product Planning meeting summary" → "Q3 Product Planning"
+   - "summarize Sprint 12 meeting" → "Sprint 12"
+   - "show product planning meeting summary" → "product planning"
+
+2. Use get_meeting_summary with extracted keywords
+   Example: get_meeting_summary("Q3 Product Planning")
+
+3. The tool returns the FULL summary (not truncated) from the database
+
+4. Display the complete summary to the user - do NOT truncate it yourself
+
+Complete example:
+User: "show product planning meeting summary"
+→ Extract keywords: "product planning" (remove "show", "meeting", "summary")
+→ Call: get_meeting_summary("product planning")
+→ Display: Full summary text exactly as returned (don't cut it off mid-sentence)
 
 ═══════════════════════════════════════════
 INTELLIGENT MEETING-AWARE QUERIES
@@ -506,12 +554,30 @@ CRITICAL: force_show_all parameter is ONLY for clarification responses!
 - Example correct: User says "show all tasks" AFTER clarification menu → use force_show_all=True
 
 When user asks for tasks and mentions a specific meeting:
-1. Use find_meeting_by_title to get the meeting_id
+1. Use find_meeting_by_title to get the meeting_id (supports fuzzy/partial matching)
 2. Then call list_my_tasks with that meeting_id
 
-Examples:
+IMPORTANT: find_meeting_by_title uses fuzzy matching! Extract ONLY the meaningful keywords:
+
+KEYWORD EXTRACTION RULES:
+1. Remove filler words: "meeting", "from", "the", "a", "an"
+2. Keep identifying terms: project names, quarters, sprint numbers, topics
+3. Keep 2-4 key words maximum
+
+Examples of keyword extraction:
+- "Q3 Product meeting" → find_meeting_by_title("Q3 Product")
+- "Sprint 12 meeting" → find_meeting_by_title("Sprint 12")
+- "Budget Review meeting" → find_meeting_by_title("Budget Review")
+- "the Q3 Planning meeting" → find_meeting_by_title("Q3 Planning")
+
+CRITICAL: The word "meeting" is NEVER part of the stored meeting title!
+Database stores: "Q3 Product Planning Discussion" (not "Q3 Product Planning Discussion meeting")
+So always REMOVE "meeting" from your search!
+
+Complete workflow examples:
 - "Show pending tasks from Q3 Planning" → find_meeting_by_title("Q3 Planning") → list_my_tasks(meeting_id=result)
 - "List John's tasks from Budget Review" → find_meeting_by_title("Budget Review") → list_my_tasks(owner="John", meeting_id=result)
+- "find all pending task from Q3 Product meeting" → find_meeting_by_title("Q3 Product") → list_my_tasks(meeting_id=result, status="Pending")
 
 When user asks for tasks WITHOUT specifying a meeting:
 - FIRST QUERY: Call list_my_tasks normally WITHOUT force_show_all parameter
@@ -542,9 +608,10 @@ When user responds to the clarification menu you just showed, check what they wa
   → The force_show_all parameter bypasses clarification and shows everything
   → Example: list_my_tasks(force_show_all=True) or list_my_tasks(status="Pending", force_show_all=True)
 
-- If they mention a specific meeting name (e.g. "Q3 Planning", "Sprint 12"):
-  → Use find_meeting_by_title to get meeting_id
+- If they mention a specific meeting name (e.g. "Q3 Planning", "Sprint 12", "Q3 Product meeting"):
+  → Use find_meeting_by_title with fuzzy matching to get meeting_id
   → Then call list_my_tasks(meeting_id=result)
+  → The tool will match partial keywords like "Q3 Product" → "Q3 Product Planning Discussion"
 
 - If they say "option 2", "option 3", or refer to a numbered choice:
   → Look at the meeting_options from the clarification result
@@ -560,7 +627,7 @@ Use 1-3 tools as needed, then provide a clear, direct answer.
 Format your response in a readable way.
 If you can't find the information, say so clearly.
 """,
-    tools=[list_my_tasks, find_meeting_by_title, search_related_notes, get_memory],
+    tools=[list_my_tasks, find_meeting_by_title, get_meeting_summary, search_related_notes, get_memory],
     output_key="query_result"
 )
 
@@ -620,13 +687,49 @@ Examples:
 
 CRITICAL for calendar event creation:
 1. title: Extract the meeting name from request (e.g. "Q4 planning" → "Q4 Planning")
-2. start_time: MUST be EXACTLY in "YYYY-MM-DD HH:MM" format (24-hour time)
-   - Convert "April 10th" → "2026-04-10" (use year 2026 if not specified)
-   - Convert "2pm" → "14:00", "10am" → "10:00", "9:30am" → "09:30"
+
+2. start_time: MUST be EXACTLY in "YYYY-MM-DD HH:MM" format (24-hour time in IST timezone)
+
+   DATE PARSING - USE parse_relative_date TOOL FOR RELIABLE CALCULATION:
+
+   CRITICAL: To avoid date calculation errors, ALWAYS use parse_relative_date tool first!
+
+   Example workflow:
+   User: "schedule meeting on Tuesday at 2pm"
+   → Step 1: Call parse_relative_date(date_string="Tuesday")
+   → Step 2: Tool returns: {"date": "2026-04-07", "day_of_week": "Tuesday", "formatted": "April 07, 2026"}
+   → Step 3: Combine with time: start_time = "2026-04-07 14:00"
+   → Step 4: Call create_calendar_event(title="Meeting", start_time="2026-04-07 14:00", ...)
+
+   The parse_relative_date tool handles:
+   - "Monday", "Tuesday", etc. → calculates next occurrence
+   - "tomorrow" → adds 1 day
+   - "next week" → adds 7 days
+   - "April 10th" → parses month/day
+
+   Context for reference: Today is 2026-04-05 (Sunday)
+   - "Monday" → 2026-04-06 (next day)
+   - "Tuesday" → 2026-04-07
+   - "Wednesday" → 2026-04-08
+   - "tomorrow" → 2026-04-06 (Monday)
+
+   TIME PARSING (24-hour format in IST):
+   - "2pm" → "14:00"
+   - "10am" → "10:00"
+   - "9:30am" → "09:30"
+   - "3:45pm" → "15:45"
    - If time not specified: CHECK MEMORY for person's preference BEFORE asking user
+
+   COMPLETE EXAMPLE:
+   User: "schedule meeting on Tuesday at 2pm"
+   → parse_relative_date("Tuesday") returns {"date": "2026-04-07"}
+   → start_time="2026-04-07 14:00"
+
 3. duration_minutes: Default to 60 if not specified
+
 4. attendees: Comma-separated email addresses (e.g. "john@example.com,sarah@gmail.com")
    - Email addresses CANNOT be inferred - always ask if not provided
+
 5. description: Brief note about the meeting (optional)
 
 The system generates pre-filled Google Calendar links for creating events.
@@ -637,24 +740,53 @@ After executing ANY command, provide a clear confirmation.
 CALENDAR EVENT FORMATTING
 ═══════════════════════════════════════════
 
-When create_calendar_event is called, it returns a pre-filled calendar link.
-The result will have method="calendar_link" and a "markdown_link" field.
+When create_calendar_event is called, it returns a dict with:
+- result["title"]: Event title
+- result["start_time"]: "YYYY-MM-DD HH:MM" format
+- result["attendees"]: List of emails
+- result["calendar_url"]: Google Calendar URL (use this for markdown link!)
 
-Format your output:
+CRITICAL: Use result["calendar_url"] with markdown link syntax [text](url)
+
+Format your output EXACTLY like this (with blank lines):
 
 **📅 Calendar Event Ready**
-**[title]** - [date] at [time]
-Attendees: [attendee_list]
 
-(Display result["markdown_link"] here - it's already a complete HTML link with target="_blank")
+**{result["title"]}** - {human-readable date} at {human-readable time} IST
+Attendees: {comma-separated result["attendees"]}
 
-This link opens Google Calendar in a new tab with all details pre-filled (including attendees in the guest list).
-When you save the event, Google will prompt you to send email invitations to all attendees.
+[Click here to add to Google Calendar]({result["calendar_url"]})
 
-IMPORTANT:
-- Display the markdown_link field value directly from the result
-- Don't add quotes or modify it - output the HTML as-is
-- The link already has target="_blank" to open in new tab
+CRITICAL FORMATTING:
+1. Convert start_time to readable format:
+   "2026-04-07 14:00" → "Tuesday, April 7, 2026 at 2:00 PM IST"
+2. Use proper line breaks between sections
+3. Bold the heading: **📅 Calendar Event Ready**
+4. Display markdown_link as-is (it's already HTML)
+
+EXAMPLES:
+
+✅ CORRECT (Tuesday example):
+**📅 Calendar Event Ready**
+
+**Demo** - Tuesday, April 7, 2026 at 2:00 PM IST
+Attendees: s@s.com
+
+[Click here to add to Google Calendar](https://calendar.google.com/calendar/render?action=TEMPLATE...)
+
+✅ CORRECT (Friday example):
+**📅 Calendar Event Ready**
+
+**Demo** - Friday, April 10, 2026 at 2:00 PM IST
+Attendees: s@s.com
+
+[Click here to add to Google Calendar](https://calendar.google.com/calendar/render?action=TEMPLATE...)
+
+❌ WRONG (everything on one line):
+Calendar Event Ready Demo - Friday, April 10, 2026 at 2:00 PM IST Attendees: s@s.com
+
+❌ WRONG (raw HTML - NEVER do this):
+<a href="https://..." target="_blank">Click here to add to Google Calendar</a>
 
 ═══════════════════════════════════════════
 """,
@@ -662,8 +794,9 @@ IMPORTANT:
         mark_task_done,
         mark_task_in_progress,
         update_task_status,
+        parse_relative_date,  # ← NEW: Reliable date calculation
         create_calendar_event,
-        get_memory,  # ← ADDED: Now execution_agent can check stored preferences!
+        get_memory,
         save_note
     ],
     output_key="execution_result"

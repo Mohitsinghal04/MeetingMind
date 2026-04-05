@@ -94,7 +94,13 @@ def save_transcript_to_state(tool_context: ToolContext, transcript: str) -> dict
     Returns:
         dict confirming the transcript was saved and prompting delegation.
     """
+    import uuid
     _ensure_state_defaults(tool_context)
+
+    # ADD REQUEST TRACKING for observability
+    request_id = str(uuid.uuid4())[:8]
+    tool_context.state["request_id"] = request_id
+    logging.info(f"📊 [{request_id}] NEW REQUEST: Transcript ({len(transcript)} chars)")
 
     tool_context.state["TRANSCRIPT"] = transcript
     session_id = getattr(tool_context, "session_id", None) or "session_default"
@@ -300,23 +306,28 @@ Return empty string if no events scheduled, otherwise return formatted confirmat
 duplicate_check_agent = Agent(
     name="duplicate_check_agent",
     model=model_name,
-    description="Silently saves tasks to database - outputs nothing.",
+    description="Saves tasks to database with automatic duplicate detection - outputs nothing.",
     instruction="""
-You are a database task manager.
-
-IMPORTANT: This agent should save tasks silently without producing any output.
+You are a smart database task manager with duplicate prevention.
 
 Your job:
 1. Extract task data from the markdown in PRIORITIZED_TASKS
 2. Parse each task line like: "• **High** — Task description — Owner: Name — Due: Date"
-3. Save all tasks using save_tasks tool
+3. Convert to JSON format: [{"task": "...", "owner": "...", "deadline": "...", "priority": "..."}]
+4. Call save_tasks tool with the JSON
 
 PRIORITIZED_TASKS:
 {prioritized_tasks}
 
+IMPORTANT: The save_tasks function automatically checks for duplicates!
+- It compares each task name with existing pending tasks in the database
+- If a similar task already exists (case-insensitive partial match), it skips saving
+- This prevents duplicate tasks when processing the same transcript multiple times
+
 After saving, return an empty string: ""
 
 Do NOT output JSON. Do NOT output confirmation. Just save silently.
+The duplicate checking happens automatically inside save_tasks.
 """,
     tools=[save_tasks],
     output_key="db_result"
@@ -431,10 +442,12 @@ Now generate the full markdown summary in this format:
 
 💾 **System Actions:**
 • [tasks_saved] tasks saved to database
+[If DB_RESULT contains tasks_skipped > 0, add:]
+• [tasks_skipped] duplicate tasks skipped (already exist in database)
 • All tasks stored for future queries
 
 📊 **Performance:**
-Processed by 4 agents sequentially (~8-10 seconds, optimized for reliability)
+Processed by 6 agents sequentially with duplicate prevention (~8-10 seconds, optimized for reliability)
 
 ---
 ✨ **What's next? Try these commands:**
@@ -492,17 +505,32 @@ User question:
 INTELLIGENT MEETING-AWARE QUERIES
 ═══════════════════════════════════════════
 
+CRITICAL: force_show_all parameter is ONLY for clarification responses!
+- Do NOT use force_show_all=True on the initial query
+- Only use it when user explicitly wants "all" AFTER seeing the clarification menu
+- Example wrong: User says "show all pending tasks" → DO NOT use force_show_all=True (first query)
+- Example correct: User says "show all tasks" AFTER clarification menu → use force_show_all=True
+
 When user asks for tasks and mentions a specific meeting:
-1. Use find_meeting_by_title to get the meeting_id
+1. Use find_meeting_by_title to get the meeting_id (supports fuzzy/partial matching)
 2. Then call list_my_tasks with that meeting_id
+
+IMPORTANT: find_meeting_by_title uses fuzzy matching! Extract keywords from user's query:
+- "Q3 Product meeting" → find_meeting_by_title("Q3 Product")
+- "Sprint 12" → find_meeting_by_title("Sprint 12")
+- "Budget Review meeting" → find_meeting_by_title("Budget Review")
 
 Examples:
 - "Show pending tasks from Q3 Planning" → find_meeting_by_title("Q3 Planning") → list_my_tasks(meeting_id=result)
 - "List John's tasks from Budget Review" → find_meeting_by_title("Budget Review") → list_my_tasks(owner="John", meeting_id=result)
+- "Show all tasks from Q3 Product meeting" → find_meeting_by_title("Q3 Product") → list_my_tasks(meeting_id=result)
 
 When user asks for tasks WITHOUT specifying a meeting:
-- Call list_my_tasks normally (no meeting_id)
-- The tool will automatically offer clarification if tasks span multiple meetings
+- FIRST QUERY: Call list_my_tasks normally WITHOUT force_show_all parameter
+  Example: list_my_tasks() or list_my_tasks(status="Pending")
+  CRITICAL: Do NOT use force_show_all=True on the first query!
+
+- The tool will automatically offer clarification if tasks span multiple meetings (>10 tasks)
 - If result["status"] == "clarification_needed", the result contains:
   - total_tasks: total count
   - meeting_options: list of meetings with task_count and title
@@ -517,18 +545,19 @@ Format the clarification nicely:
 
 Which would you like to see?
 
-HANDLING USER'S CLARIFICATION RESPONSE:
-When user responds to the clarification menu, check what they want:
+HANDLING USER'S CLARIFICATION RESPONSE (SECOND QUERY):
+When user responds to the clarification menu you just showed, check what they want:
 
 - If they say "all", "all tasks", "both", "both meetings", "everything", "show all", "option 1", or "1":
   → They want ALL tasks from ALL meetings
-  → Call list_my_tasks(force_show_all=True)
+  → NOW call list_my_tasks(force_show_all=True)
   → The force_show_all parameter bypasses clarification and shows everything
   → Example: list_my_tasks(force_show_all=True) or list_my_tasks(status="Pending", force_show_all=True)
 
-- If they mention a specific meeting name (e.g. "Q3 Planning", "Sprint 12"):
-  → Use find_meeting_by_title to get meeting_id
+- If they mention a specific meeting name (e.g. "Q3 Planning", "Sprint 12", "Q3 Product meeting"):
+  → Use find_meeting_by_title with fuzzy matching to get meeting_id
   → Then call list_my_tasks(meeting_id=result)
+  → The tool will match partial keywords like "Q3 Product" → "Q3 Product Planning Discussion"
 
 - If they say "option 2", "option 3", or refer to a numbered choice:
   → Look at the meeting_options from the clarification result

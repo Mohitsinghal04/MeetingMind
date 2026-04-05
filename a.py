@@ -24,16 +24,21 @@ from google.adk.tools.tool_context import ToolContext
 
 from .tools.db_tools import (
     save_meeting,
-    save_tasks,
     check_duplicate_tasks,
     get_pending_tasks,
-    update_task_status,
-    save_note,
-    search_notes,
     save_memory,
     get_memory,
+    get_meeting_summary,
 )
-from .tools.calendar_tools import create_calendar_event, get_available_slots
+# MCP-compatible imports (HACKATHON DEMO - routes through MCP wrapper layer)
+from .tools.mcp_wrapper import (
+    save_tasks_mcp as save_tasks,
+    update_task_status_mcp as update_task_status,
+    save_note_mcp as save_note,
+    search_notes_mcp as search_notes,
+    create_calendar_event_mcp as create_calendar_event,
+)
+from .tools.calendar_tools import get_available_slots
 from .tools.task_tools import list_my_tasks, mark_task_done, mark_task_in_progress, find_meeting_by_title
 from .tools.notes_tools import search_related_notes, save_meeting_note
 
@@ -50,6 +55,34 @@ load_dotenv()
 model_name = os.getenv("MODEL", "gemini-2.5-flash")
 
 
+# ── STATE MANAGEMENT ──────────────────────────────────────────
+
+# Centralized state defaults (Issue 7 fix)
+_STATE_DEFAULTS = {
+    "TRANSCRIPT": "",
+    "session_id": "session_default",
+    "db_result": {"tasks_saved": 0, "status": "pending"},
+    "user_query": "",
+    "user_command": "",
+    "memory_input": "",
+    "current_meeting_id": None,
+    "current_meeting_title": None,
+    "meeting_summary": "",
+    "prioritized_tasks": "",
+    "scheduled_events": "",
+    "notes_result": {},
+    "memory_result": {},
+    "final_briefing": ""
+}
+
+
+def _ensure_state_defaults(tool_context: ToolContext) -> None:
+    """Initialize all state variables to prevent KeyError in sub-agents."""
+    for key, default_value in _STATE_DEFAULTS.items():
+        if key not in tool_context.state:
+            tool_context.state[key] = default_value
+
+
 # ── STATE TOOL ────────────────────────────────────────────────
 
 def save_transcript_to_state(tool_context: ToolContext, transcript: str) -> dict:
@@ -62,15 +95,17 @@ def save_transcript_to_state(tool_context: ToolContext, transcript: str) -> dict
     Returns:
         dict confirming the transcript was saved and prompting delegation.
     """
+    import uuid
+    _ensure_state_defaults(tool_context)
+
+    # ADD REQUEST TRACKING for observability
+    request_id = str(uuid.uuid4())[:8]
+    tool_context.state["request_id"] = request_id
+    logging.info(f"📊 [{request_id}] NEW REQUEST: Transcript ({len(transcript)} chars)")
+
     tool_context.state["TRANSCRIPT"] = transcript
     session_id = getattr(tool_context, "session_id", None) or "session_default"
     tool_context.state["session_id"] = session_id
-
-    # Pre-initialize ALL state variables to prevent KeyError in sub-agents
-    tool_context.state["db_result"] = {"tasks_saved": 0, "status": "pending"}
-    tool_context.state["user_query"] = ""        # For query_agent
-    tool_context.state["user_command"] = ""      # For execution_agent
-    tool_context.state["memory_input"] = ""      # For memory_store_agent
 
     logging.info(f"Transcript saved to state ({len(transcript)} chars)")
     return {
@@ -91,17 +126,7 @@ def set_user_query(tool_context: ToolContext, query: str) -> dict:
     Returns:
         dict confirming query was saved.
     """
-    # Pre-initialize ALL state variables if not already set
-    if "TRANSCRIPT" not in tool_context.state:
-        tool_context.state["TRANSCRIPT"] = ""
-    if "user_command" not in tool_context.state:
-        tool_context.state["user_command"] = ""
-    if "memory_input" not in tool_context.state:
-        tool_context.state["memory_input"] = ""
-    if "db_result" not in tool_context.state:
-        tool_context.state["db_result"] = {"tasks_saved": 0, "status": "pending"}
-
-    # Set the actual query
+    _ensure_state_defaults(tool_context)
     tool_context.state["user_query"] = query
     return {"status": "success", "query": query}
 
@@ -116,17 +141,7 @@ def set_user_command(tool_context: ToolContext, command: str) -> dict:
     Returns:
         dict confirming command was saved.
     """
-    # Pre-initialize ALL state variables if not already set
-    if "TRANSCRIPT" not in tool_context.state:
-        tool_context.state["TRANSCRIPT"] = ""
-    if "user_query" not in tool_context.state:
-        tool_context.state["user_query"] = ""
-    if "memory_input" not in tool_context.state:
-        tool_context.state["memory_input"] = ""
-    if "db_result" not in tool_context.state:
-        tool_context.state["db_result"] = {"tasks_saved": 0, "status": "pending"}
-
-    # Set the actual command
+    _ensure_state_defaults(tool_context)
     tool_context.state["user_command"] = command
     return {"status": "success", "command": command}
 
@@ -141,17 +156,7 @@ def set_memory_input(tool_context: ToolContext, information: str) -> dict:
     Returns:
         dict confirming memory input was saved.
     """
-    # Pre-initialize ALL state variables if not already set
-    if "TRANSCRIPT" not in tool_context.state:
-        tool_context.state["TRANSCRIPT"] = ""
-    if "user_query" not in tool_context.state:
-        tool_context.state["user_query"] = ""
-    if "user_command" not in tool_context.state:
-        tool_context.state["user_command"] = ""
-    if "db_result" not in tool_context.state:
-        tool_context.state["db_result"] = {"tasks_saved": 0, "status": "pending"}
-
-    # Set the actual memory input
+    _ensure_state_defaults(tool_context)
     tool_context.state["memory_input"] = information
     return {"status": "success", "information": information}
 
@@ -182,6 +187,29 @@ TRANSCRIPT:
 Return only the summary text. No preamble, no labels, just the summary.
 """,
     output_key="meeting_summary"
+)
+
+meeting_save_agent = Agent(
+    name="meeting_save_agent",
+    model=model_name,
+    description="Saves the meeting transcript and summary to database (sets meeting_id for tasks).",
+    instruction="""
+You are a database persistence agent.
+
+Your job: Save the meeting to the database so tasks can be linked to it.
+
+Use save_meeting tool with:
+- transcript: {TRANSCRIPT}
+- summary: {meeting_summary}
+
+The function will return a meeting_id which gets stored in state for other agents.
+
+After saving, return empty string: ""
+
+CRITICAL: This must run BEFORE tasks are saved so they can be linked to this meeting.
+""",
+    tools=[save_meeting],
+    output_key="meeting_saved"
 )
 
 action_item_priority_agent = Agent(
@@ -247,9 +275,19 @@ Your job: Look for tasks that mention scheduling a meeting with a specific date/
 
 If you find a task that needs scheduling:
 1. Extract: title, date, time, attendees (email addresses)
-2. Call create_calendar_event with:
+
+2. Convert relative dates to absolute YYYY-MM-DD format:
+   CONTEXT: Today is 2026-04-05 (Saturday)
+   - "Monday" → Calculate next Monday → 2026-04-07
+   - "next Monday" → 2026-04-07 (one week from today is April 12, but "next Monday" means the upcoming Monday)
+   - "this Monday" → 2026-04-07 (the upcoming Monday)
+   - "tomorrow" → 2026-04-06
+   - "April 10th" → 2026-04-10
+   - "next week" → Add 7 days → 2026-04-12
+
+3. Call create_calendar_event with:
    - title: "Design Review Meeting"
-   - start_time: "2026-06-15 10:00" (MUST be YYYY-MM-DD HH:MM format)
+   - start_time: "2026-04-07 10:00" (MUST be YYYY-MM-DD HH:MM format)
    - duration_minutes: 60 (default) or parse from task
    - attendees: "john@example.com,sarah@company.com" (comma-separated emails)
    - description: "Scheduled from meeting transcript"
@@ -279,23 +317,28 @@ Return empty string if no events scheduled, otherwise return formatted confirmat
 duplicate_check_agent = Agent(
     name="duplicate_check_agent",
     model=model_name,
-    description="Silently saves tasks to database - outputs nothing.",
+    description="Saves tasks to database with automatic duplicate detection - outputs nothing.",
     instruction="""
-You are a database task manager.
-
-IMPORTANT: This agent should save tasks silently without producing any output.
+You are a smart database task manager with duplicate prevention.
 
 Your job:
 1. Extract task data from the markdown in PRIORITIZED_TASKS
 2. Parse each task line like: "• **High** — Task description — Owner: Name — Due: Date"
-3. Save all tasks using save_tasks tool
+3. Convert to JSON format: [{"task": "...", "owner": "...", "deadline": "...", "priority": "..."}]
+4. Call save_tasks tool with the JSON
 
 PRIORITIZED_TASKS:
 {prioritized_tasks}
 
+IMPORTANT: The save_tasks function automatically checks for duplicates!
+- It compares each task name with existing pending tasks in the database
+- If a similar task already exists (case-insensitive partial match), it skips saving
+- This prevents duplicate tasks when processing the same transcript multiple times
+
 After saving, return an empty string: ""
 
 Do NOT output JSON. Do NOT output confirmation. Just save silently.
+The duplicate checking happens automatically inside save_tasks.
 """,
     tools=[save_tasks],
     output_key="db_result"
@@ -410,10 +453,12 @@ Now generate the full markdown summary in this format:
 
 💾 **System Actions:**
 • [tasks_saved] tasks saved to database
+[If DB_RESULT contains tasks_skipped > 0, add:]
+• [tasks_skipped] duplicate tasks skipped (already exist in database)
 • All tasks stored for future queries
 
 📊 **Performance:**
-Processed by 4 agents sequentially (~8-10 seconds, optimized for reliability)
+Processed by 6 agents sequentially with duplicate prevention (~8-10 seconds, optimized for reliability)
 
 ---
 ✨ **What's next? Try these commands:**
@@ -461,6 +506,7 @@ The user has asked a question. Use your tools to find the answer.
 Available tools:
 - list_my_tasks: find tasks (filter by owner, priority, status, or meeting_id)
 - find_meeting_by_title: search for a meeting by title/keyword to get its meeting_id
+- get_meeting_summary: retrieve the FULL summary of a specific meeting (use for "summarize X meeting" queries)
 - search_related_notes: search past meeting notes
 - get_memory: retrieve stored information
 
@@ -468,20 +514,53 @@ User question:
 {user_query}
 
 ═══════════════════════════════════════════
+MEETING SUMMARY QUERIES
+═══════════════════════════════════════════
+
+When user asks for a meeting summary (e.g., "show Q3 Product Planning meeting summary", "summarize Sprint 12 meeting"):
+
+1. Use get_meeting_summary with keywords from the meeting title
+   Example: "summarize Q3 Product Planning Meeting" → get_meeting_summary("Q3 Product Planning")
+
+2. The tool returns the FULL summary (not truncated) from the database
+
+3. Display the complete summary to the user - do NOT truncate it yourself
+
+Example:
+User: "show product planning meeting summary"
+→ Call: get_meeting_summary("product planning")
+→ Display: Full summary text exactly as returned (don't cut it off mid-sentence)
+
+═══════════════════════════════════════════
 INTELLIGENT MEETING-AWARE QUERIES
 ═══════════════════════════════════════════
 
+CRITICAL: force_show_all parameter is ONLY for clarification responses!
+- Do NOT use force_show_all=True on the initial query
+- Only use it when user explicitly wants "all" AFTER seeing the clarification menu
+- Example wrong: User says "show all pending tasks" → DO NOT use force_show_all=True (first query)
+- Example correct: User says "show all tasks" AFTER clarification menu → use force_show_all=True
+
 When user asks for tasks and mentions a specific meeting:
-1. Use find_meeting_by_title to get the meeting_id
+1. Use find_meeting_by_title to get the meeting_id (supports fuzzy/partial matching)
 2. Then call list_my_tasks with that meeting_id
+
+IMPORTANT: find_meeting_by_title uses fuzzy matching! Extract keywords from user's query:
+- "Q3 Product meeting" → find_meeting_by_title("Q3 Product")
+- "Sprint 12" → find_meeting_by_title("Sprint 12")
+- "Budget Review meeting" → find_meeting_by_title("Budget Review")
 
 Examples:
 - "Show pending tasks from Q3 Planning" → find_meeting_by_title("Q3 Planning") → list_my_tasks(meeting_id=result)
 - "List John's tasks from Budget Review" → find_meeting_by_title("Budget Review") → list_my_tasks(owner="John", meeting_id=result)
+- "Show all tasks from Q3 Product meeting" → find_meeting_by_title("Q3 Product") → list_my_tasks(meeting_id=result)
 
 When user asks for tasks WITHOUT specifying a meeting:
-- Call list_my_tasks normally (no meeting_id)
-- The tool will automatically offer clarification if tasks span multiple meetings
+- FIRST QUERY: Call list_my_tasks normally WITHOUT force_show_all parameter
+  Example: list_my_tasks() or list_my_tasks(status="Pending")
+  CRITICAL: Do NOT use force_show_all=True on the first query!
+
+- The tool will automatically offer clarification if tasks span multiple meetings (>10 tasks)
 - If result["status"] == "clarification_needed", the result contains:
   - total_tasks: total count
   - meeting_options: list of meetings with task_count and title
@@ -496,7 +575,27 @@ Format the clarification nicely:
 
 Which would you like to see?
 
-Then wait for user to clarify, and call list_my_tasks again with appropriate meeting_id.
+HANDLING USER'S CLARIFICATION RESPONSE (SECOND QUERY):
+When user responds to the clarification menu you just showed, check what they want:
+
+- If they say "all", "all tasks", "both", "both meetings", "everything", "show all", "option 1", or "1":
+  → They want ALL tasks from ALL meetings
+  → NOW call list_my_tasks(force_show_all=True)
+  → The force_show_all parameter bypasses clarification and shows everything
+  → Example: list_my_tasks(force_show_all=True) or list_my_tasks(status="Pending", force_show_all=True)
+
+- If they mention a specific meeting name (e.g. "Q3 Planning", "Sprint 12", "Q3 Product meeting"):
+  → Use find_meeting_by_title with fuzzy matching to get meeting_id
+  → Then call list_my_tasks(meeting_id=result)
+  → The tool will match partial keywords like "Q3 Product" → "Q3 Product Planning Discussion"
+
+- If they say "option 2", "option 3", or refer to a numbered choice:
+  → Look at the meeting_options from the clarification result
+  → Option 1 = all tasks (use force_show_all=True)
+  → Option 2+ = specific meeting (use that meeting_id)
+
+CRITICAL: When user wants "all tasks", you MUST use force_show_all=True parameter.
+This tells the function to skip the clarification menu and return all tasks immediately.
 
 ═══════════════════════════════════════════
 
@@ -504,7 +603,7 @@ Use 1-3 tools as needed, then provide a clear, direct answer.
 Format your response in a readable way.
 If you can't find the information, say so clearly.
 """,
-    tools=[list_my_tasks, find_meeting_by_title, search_related_notes, get_memory],
+    tools=[list_my_tasks, find_meeting_by_title, get_meeting_summary, search_related_notes, get_memory],
     output_key="query_result"
 )
 
@@ -564,13 +663,31 @@ Examples:
 
 CRITICAL for calendar event creation:
 1. title: Extract the meeting name from request (e.g. "Q4 planning" → "Q4 Planning")
-2. start_time: MUST be EXACTLY in "YYYY-MM-DD HH:MM" format (24-hour time)
-   - Convert "April 10th" → "2026-04-10" (use year 2026 if not specified)
-   - Convert "2pm" → "14:00", "10am" → "10:00", "9:30am" → "09:30"
+
+2. start_time: MUST be EXACTLY in "YYYY-MM-DD HH:MM" format (24-hour time in IST timezone)
+
+   DATE PARSING (Context: Today is 2026-04-05, Saturday):
+   - "Monday" → Calculate next Monday → 2026-04-07 (upcoming Monday)
+   - "next Monday" → 2026-04-07 (same as "Monday" - the upcoming one)
+   - "this Monday" → 2026-04-07
+   - "tomorrow" → 2026-04-06 (Sunday)
+   - "April 10th" or "April 10" → 2026-04-10
+   - "next week" → Add 7 days → 2026-04-12
+
+   TIME PARSING (24-hour format in IST):
+   - "2pm" → "14:00"
+   - "10am" → "10:00"
+   - "9:30am" → "09:30"
+   - "3:45pm" → "15:45"
    - If time not specified: CHECK MEMORY for person's preference BEFORE asking user
+
+   EXAMPLE: "schedule meeting on Monday at 2pm" → start_time="2026-04-07 14:00"
+
 3. duration_minutes: Default to 60 if not specified
+
 4. attendees: Comma-separated email addresses (e.g. "john@example.com,sarah@gmail.com")
    - Email addresses CANNOT be inferred - always ask if not provided
+
 5. description: Brief note about the meeting (optional)
 
 The system generates pre-filled Google Calendar links for creating events.
@@ -654,13 +771,14 @@ Keep it simple and conversational.
 # action_item_priority_agent outputs markdown, scheduler creates REAL Google Calendar events
 transcript_pipeline = SequentialAgent(
     name="transcript_pipeline",
-    description="Transcript processing with real calendar event creation (5 agents).",
+    description="Transcript processing with real calendar event creation (6 agents).",
     sub_agents=[
         summary_agent,                # 1. Summarize transcript
-        action_item_priority_agent,   # 2. Extract + Prioritize tasks
-        scheduler_agent,              # 3. Create calendar events with links
-        duplicate_check_agent,        # 4. Save tasks to DB (silent, no output)
-        briefing_agent,               # 5. Assemble all outputs into final markdown
+        meeting_save_agent,           # 2. Save meeting to DB (sets meeting_id in state)
+        action_item_priority_agent,   # 3. Extract + Prioritize tasks
+        scheduler_agent,              # 4. Create calendar events with links
+        duplicate_check_agent,        # 5. Save tasks to DB (links to meeting_id)
+        briefing_agent,               # 6. Assemble all outputs into final markdown
     ]
 )
 

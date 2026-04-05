@@ -15,6 +15,8 @@ import psycopg2
 import psycopg2.extras
 from psycopg2.pool import ThreadedConnectionPool
 from google.adk.tools.tool_context import ToolContext
+from .metrics import timed_operation
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 
 # ── CONNECTION POOLING ────────────────────────────────────────────────
@@ -61,6 +63,13 @@ def get_db_connection():
 
 # ── MEETINGS ──────────────────────────────────────────────────
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type(psycopg2.OperationalError),
+    reraise=True
+)
+@timed_operation("save_meeting")
 def save_meeting(tool_context: ToolContext, transcript: str, summary: str, meeting_title: Optional[str] = None) -> dict:
     """Save a meeting transcript and summary to the database.
 
@@ -112,15 +121,23 @@ def save_meeting(tool_context: ToolContext, transcript: str, summary: str, meeti
 
 # ── TASKS ─────────────────────────────────────────────────────
 
-def save_tasks(tool_context: ToolContext, tasks_json: str) -> dict:
-    """Save a list of tasks to the database.
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type(psycopg2.OperationalError),
+    reraise=True
+)
+@timed_operation("save_tasks")
+def save_tasks(tool_context: ToolContext, tasks_json: str, skip_duplicate_check: bool = False) -> dict:
+    """Save a list of tasks to the database with optional duplicate checking.
 
     Args:
         tool_context: ADK tool context with session state.
         tasks_json: JSON string array of tasks, each with task, owner, deadline, priority fields.
+        skip_duplicate_check: If True, skip duplicate checking (for internal use). Default False.
 
     Returns:
-        dict with status and count of tasks saved.
+        dict with status, count of tasks saved, and count of duplicates skipped.
     """
     try:
         tasks = json.loads(tasks_json) if isinstance(tasks_json, str) else tasks_json
@@ -131,8 +148,24 @@ def save_tasks(tool_context: ToolContext, tasks_json: str) -> dict:
             cur = conn.cursor()
             meeting_id = tool_context.state.get("current_meeting_id")
             saved_ids = []
+            skipped_duplicates = []
 
             for task in tasks:
+                task_name = task.get("task", task.get("task_name", "Unnamed task"))
+
+                # Check for duplicates unless explicitly skipped
+                if not skip_duplicate_check:
+                    duplicate_check = check_duplicate_tasks(tool_context, task_name)
+                    if duplicate_check.get("is_duplicate"):
+                        existing = duplicate_check.get("existing_task", {})
+                        skipped_duplicates.append({
+                            "task": task_name,
+                            "reason": f"Similar task exists: '{existing.get('task_name')}' ({existing.get('status')})"
+                        })
+                        logging.info(f"⏭️  Skipped duplicate: {task_name}")
+                        continue  # Skip saving this task
+
+                # No duplicate found - save the task
                 task_id = str(uuid.uuid4())
                 cur.execute(
                     """INSERT INTO tasks
@@ -141,7 +174,7 @@ def save_tasks(tool_context: ToolContext, tasks_json: str) -> dict:
                     (
                         task_id,
                         meeting_id,
-                        task.get("task", task.get("task_name", "Unnamed task")),
+                        task_name,
                         task.get("owner", "Unassigned"),
                         task.get("deadline", "Not specified"),
                         task.get("priority", "Medium"),
@@ -150,22 +183,32 @@ def save_tasks(tool_context: ToolContext, tasks_json: str) -> dict:
                     )
                 )
                 saved_ids.append(task_id)
+                logging.info(f"✅ Saved task: {task_name}")
 
             conn.commit()
             cur.close()
 
-            logging.info(f"Saved {len(saved_ids)} tasks to DB")
-            return {
+            result = {
                 "status": "success",
                 "tasks_saved": len(saved_ids),
+                "tasks_skipped": len(skipped_duplicates),
                 "task_ids": saved_ids
             }
 
+            if skipped_duplicates:
+                result["skipped_details"] = skipped_duplicates
+                logging.info(f"📊 Save summary: {len(saved_ids)} saved, {len(skipped_duplicates)} duplicates skipped")
+            else:
+                logging.info(f"📊 Saved {len(saved_ids)} tasks to DB (no duplicates)")
+
+            return result
+
     except Exception as e:
         logging.error(f"Error saving tasks: {e}")
-        return {"status": "error", "message": str(e), "tasks_saved": 0}
+        return {"status": "error", "message": str(e), "tasks_saved": 0, "tasks_skipped": 0}
 
 
+@timed_operation("check_duplicate_tasks")
 def check_duplicate_tasks(tool_context: ToolContext, task_name: str) -> dict:
     """Check if a similar task already exists in the database.
 

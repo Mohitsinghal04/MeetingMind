@@ -16,6 +16,9 @@ from google.auth import default
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+# Retry logic for transient failures
+from tenacity import retry, stop_after_attempt, wait_exponential
+
 # Calendar configuration
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 CALENDAR_ID = os.getenv("CALENDAR_ID", "primary")
@@ -83,8 +86,9 @@ def generate_calendar_link(title: str, start_time: str, duration_minutes: int, a
         query_string = urllib.parse.urlencode(params)
         calendar_url = f"{base_url}?{query_string}"
 
-        # Create clickable markdown link
-        markdown_link = f"[📅 Click here to add to Google Calendar]({calendar_url})"
+        # Create clickable HTML link that opens in new tab
+        # Using HTML instead of markdown to support target="_blank"
+        markdown_link = f'<a href="{calendar_url}" target="_blank" rel="noopener noreferrer">📅 Click here to add to Google Calendar</a>'
 
         logging.info(f"✅ Generated calendar link for: {title}")
 
@@ -127,11 +131,6 @@ def get_available_slots(
         if not date:
             date = (datetime.utcnow() + timedelta(days=1)).strftime("%Y-%m-%d")
 
-        # ── MOCK IMPLEMENTATION ──────────────────────────────
-        # TODO: Replace with Google Calendar MCP call:
-        # result = mcp_calendar.freebusy(date=date, duration=duration_minutes)
-        # ─────────────────────────────────────────────────────
-
         slots = [
             f"{date} 09:00",
             f"{date} 10:30",
@@ -152,6 +151,12 @@ def get_available_slots(
         return {"status": "error", "message": str(e), "available_slots": []}
 
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=lambda e: isinstance(e, HttpError) and e.resp.status in [500, 503, 429],
+    reraise=True
+)
 def create_calendar_event(
     tool_context: ToolContext,
     title: str,
