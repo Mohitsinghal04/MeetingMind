@@ -609,3 +609,69 @@ def get_memory(tool_context: ToolContext, key: Optional[str] = None) -> dict:
     except Exception as e:
         logging.error(f"Error getting memory: {e}")
         return {"status": "error", "message": str(e), "memories": [], "count": 0}
+
+
+def get_meeting_summary(tool_context: ToolContext, meeting_title_keyword: str) -> dict:
+    """Retrieve the full summary of a specific meeting by searching the title/summary.
+
+    Args:
+        tool_context: ADK tool context.
+        meeting_title_keyword: Partial meeting title or keyword to search for.
+
+    Returns:
+        dict with full meeting summary and metadata.
+    """
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+
+            # Search in summary (case-insensitive partial match)
+            cur.execute(
+                """SELECT id, summary, created_at, session_id
+                   FROM meetings
+                   WHERE LOWER(summary) LIKE LOWER(%s)
+                   ORDER BY created_at DESC
+                   LIMIT 5""",
+                (f"%{meeting_title_keyword}%",)
+            )
+            meetings = [dict(row) for row in cur.fetchall()]
+            cur.close()
+
+        if not meetings:
+            return {
+                "status": "not_found",
+                "message": f"No meeting found matching '{meeting_title_keyword}'"
+            }
+
+        if len(meetings) == 1:
+            meeting = meetings[0]
+            # Extract title from summary (first sentence)
+            title = meeting['summary'].split('.')[0].strip()[:100] if meeting['summary'] else "Untitled Meeting"
+
+            return {
+                "status": "success",
+                "meeting_id": meeting['id'],
+                "title": title,
+                "summary": meeting['summary'],  # FULL summary, not truncated
+                "created_at": meeting['created_at'].isoformat() if hasattr(meeting['created_at'], 'isoformat') else str(meeting['created_at'])
+            }
+
+        # Multiple matches - return options
+        options = []
+        for m in meetings:
+            title = m['summary'].split('.')[0].strip()[:100] if m['summary'] else "Untitled Meeting"
+            options.append({
+                "meeting_id": m['id'],
+                "title": title,
+                "created_at": m['created_at'].isoformat() if hasattr(m['created_at'], 'isoformat') else str(m['created_at'])
+            })
+
+        return {
+            "status": "multiple_matches",
+            "message": f"Found {len(meetings)} meetings matching '{meeting_title_keyword}'",
+            "options": options
+        }
+
+    except Exception as e:
+        logging.error(f"Error getting meeting summary: {e}")
+        return {"status": "error", "message": str(e)}

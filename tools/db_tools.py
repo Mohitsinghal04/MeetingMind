@@ -611,6 +611,64 @@ def get_memory(tool_context: ToolContext, key: Optional[str] = None) -> dict:
         return {"status": "error", "message": str(e), "memories": [], "count": 0}
 
 
+def list_all_meetings(tool_context: ToolContext, limit: int = 20) -> dict:
+    """List all meetings stored in the database.
+
+    Args:
+        tool_context: ADK tool context.
+        limit: Maximum number of meetings to return (default 20).
+
+    Returns:
+        dict with list of all meetings with titles and dates.
+    """
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+
+            cur.execute(
+                """SELECT id, summary, created_at, session_id
+                   FROM meetings
+                   ORDER BY created_at DESC
+                   LIMIT %s""",
+                (limit,)
+            )
+            meetings = [dict(row) for row in cur.fetchall()]
+            cur.close()
+
+        if not meetings:
+            return {
+                "status": "success",
+                "count": 0,
+                "meetings": [],
+                "message": "No meetings found in the database."
+            }
+
+        # Extract titles and format dates
+        formatted_meetings = []
+        for m in meetings:
+            # Extract title from summary (first sentence, max 100 chars)
+            summary = m.get('summary', '')
+            title = summary.split('.')[0].strip()[:100] if summary else "Untitled Meeting"
+
+            formatted_meetings.append({
+                "meeting_id": m['id'],
+                "title": title,
+                "created_at": m['created_at'].isoformat() if hasattr(m['created_at'], 'isoformat') else str(m['created_at']),
+                "summary_preview": summary[:200] + "..." if len(summary) > 200 else summary
+            })
+
+        return {
+            "status": "success",
+            "count": len(formatted_meetings),
+            "meetings": formatted_meetings,
+            "message": f"Found {len(formatted_meetings)} meetings."
+        }
+
+    except Exception as e:
+        logging.error(f"Error listing meetings: {e}")
+        return {"status": "error", "message": str(e), "count": 0, "meetings": []}
+
+
 def get_meeting_summary(tool_context: ToolContext, meeting_title_keyword: str) -> dict:
     """Retrieve the full summary of a specific meeting by searching the title/summary.
 
