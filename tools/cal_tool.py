@@ -7,6 +7,7 @@ This ensures reliability while maintaining automation when possible.
 import logging
 import os
 import urllib.parse
+import pytz
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from google.adk.tools.tool_context import ToolContext
@@ -53,15 +54,25 @@ def generate_calendar_link(title: str, start_time: str, duration_minutes: int, a
         dict with calendar link and instructions
     """
     try:
-        # Parse start time
-        start_dt = datetime.strptime(start_time, "%Y-%m-%d %H:%M")
-        end_dt = start_dt + timedelta(minutes=duration_minutes)
+        # Parse start time and handle timezone conversion properly
+        # The start_time comes in user's local timezone (from TIMEZONE env var)
+        user_tz = pytz.timezone(DEFAULT_TIMEZONE)  # Asia/Kolkata from .env
+
+        # Parse as naive datetime first
+        start_dt_naive = datetime.strptime(start_time, "%Y-%m-%d %H:%M")
+
+        # Localize to user's timezone (IST)
+        start_dt_local = user_tz.localize(start_dt_naive)
 
         # Convert to UTC for Google Calendar link
+        start_dt_utc = start_dt_local.astimezone(pytz.UTC)
+        end_dt_utc = start_dt_utc + timedelta(minutes=duration_minutes)
+
+        # Format as UTC (with Z suffix)
         # Format MUST be: YYYYMMDDTHHMMSSZ (no separators except T and Z)
         # Example: 20260410T140000Z
-        f_start = start_dt.strftime("%Y%m%dT%H%M%S") + "Z"
-        f_end = end_dt.strftime("%Y%m%dT%H%M%S") + "Z"
+        f_start = start_dt_utc.strftime("%Y%m%dT%H%M%S") + "Z"
+        f_end = end_dt_utc.strftime("%Y%m%dT%H%M%S") + "Z"
 
         # Build description with attendees
         full_description = description or "Created by MeetingMind"
@@ -86,16 +97,11 @@ def generate_calendar_link(title: str, start_time: str, duration_minutes: int, a
         query_string = urllib.parse.urlencode(params)
         calendar_url = f"{base_url}?{query_string}"
 
-        # Create clickable HTML link that opens in new tab
-        # Using HTML instead of markdown to support target="_blank"
-        markdown_link = f'<a href="{calendar_url}" target="_blank" rel="noopener noreferrer">📅 Click here to add to Google Calendar</a>'
-
         logging.info(f"✅ Generated calendar link for: {title}")
 
         return {
             "status": "link_generated",
-            "calendar_url": calendar_url,
-            "markdown_link": markdown_link,  # ← NEW: Clickable markdown link
+            "calendar_url": calendar_url,  # Clean URL for markdown links
             "title": title,
             "start_time": start_time,
             "duration_minutes": duration_minutes,

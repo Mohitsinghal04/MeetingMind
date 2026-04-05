@@ -296,14 +296,14 @@ If you find a task that needs scheduling:
    - attendees: "john@example.com,sarah@company.com" (comma-separated emails)
    - description: "Scheduled from meeting transcript"
 
-3. The function returns result["calendar_url"]. Format your output with markdown link:
+3. The function returns result["calendar_link_html"]. Format your output:
 
    📅 **[Event title]** - [Date] at [Time] IST
-   [Click here to add to Google Calendar]({result["calendar_url"]})
+   {result["calendar_link_html"]}
 
    Example output:
    📅 **Design Review** - Monday, April 6, 2026 at 10:00 AM IST
-   [Click here to add to Google Calendar](https://calendar.google.com/...)
+   <a href="https://calendar.google.com/..." target="_blank" rel="noopener noreferrer">📅 Click here to add to Google Calendar</a>
 
 If NO tasks need scheduling, return empty string: ""
 
@@ -312,7 +312,7 @@ IMPORTANT:
 - Attendees should be email addresses (use @example.com if only names given)
 - If uncertain about date/time, don't schedule
 - If nothing to schedule, return empty string
-- Use markdown link format [text](url), NOT raw HTML
+- Output result["calendar_link_html"] EXACTLY as-is (it's pre-formatted HTML)
 
 Return empty string if no events scheduled, otherwise return formatted confirmation.
 """,
@@ -742,11 +742,10 @@ CALENDAR EVENT FORMATTING
 
 When create_calendar_event is called, it returns a dict with:
 - result["title"]: Event title
-- result["start_time"]: "YYYY-MM-DD HH:MM" format
-- result["attendees"]: List of emails
-- result["calendar_url"]: Google Calendar URL (use this for markdown link!)
-
-CRITICAL: Use result["calendar_url"] with markdown link syntax [text](url)
+- result["start_time"]: "YYYY-MM-DD HH:MM" format (e.g., "2026-04-07 14:00")
+- result["attendees"]: List of email addresses
+- result["calendar_url"]: Direct Google Calendar link
+- result["calendar_link_html"]: Pre-formatted HTML link with target="_blank"
 
 Format your output EXACTLY like this (with blank lines):
 
@@ -755,7 +754,14 @@ Format your output EXACTLY like this (with blank lines):
 **{result["title"]}** - {human-readable date} at {human-readable time} IST
 Attendees: {comma-separated result["attendees"]}
 
-[Click here to add to Google Calendar]({result["calendar_url"]})
+{result["calendar_link_html"]}
+
+CRITICAL RULES:
+1. Convert start_time to readable format: "2026-04-07 14:00" → "Tuesday, April 7, 2026 at 2:00 PM IST"
+2. Display result["calendar_link_html"] EXACTLY as-is on its own line
+3. Do NOT modify, escape, or wrap the HTML
+4. Do NOT add quotes around it
+5. Do NOT convert it to markdown
 
 CRITICAL FORMATTING:
 1. Convert start_time to readable format:
@@ -772,7 +778,7 @@ EXAMPLES:
 **Demo** - Tuesday, April 7, 2026 at 2:00 PM IST
 Attendees: s@s.com
 
-[Click here to add to Google Calendar](https://calendar.google.com/calendar/render?action=TEMPLATE...)
+<a href="https://calendar.google.com/calendar/render?action=TEMPLATE&text=Demo&dates=20260407T083000Z/20260407T093000Z&details=Created+by+MeetingMind&add=s@s.com" target="_blank" rel="noopener noreferrer">📅 Click here to add to Google Calendar</a>
 
 ✅ CORRECT (Friday example):
 **📅 Calendar Event Ready**
@@ -780,13 +786,15 @@ Attendees: s@s.com
 **Demo** - Friday, April 10, 2026 at 2:00 PM IST
 Attendees: s@s.com
 
-[Click here to add to Google Calendar](https://calendar.google.com/calendar/render?action=TEMPLATE...)
+<a href="https://calendar.google.com/calendar/render?action=TEMPLATE&text=Demo&dates=20260410T083000Z/20260410T093000Z&details=Created+by+MeetingMind&add=s@s.com" target="_blank" rel="noopener noreferrer">📅 Click here to add to Google Calendar</a>
 
 ❌ WRONG (everything on one line):
 Calendar Event Ready Demo - Friday, April 10, 2026 at 2:00 PM IST Attendees: s@s.com
 
-❌ WRONG (raw HTML - NEVER do this):
-<a href="https://..." target="_blank">Click here to add to Google Calendar</a>
+❌ WRONG (modifying the HTML):
+[Click here...](url) ← Don't convert to markdown!
+"<a href=..." ← Don't add quotes!
+&lt;a href=... ← Don't escape the HTML!
 
 ═══════════════════════════════════════════
 """,

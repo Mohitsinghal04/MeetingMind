@@ -101,7 +101,8 @@ def generate_calendar_link(title: str, start_time: str, duration_minutes: int, a
 
         return {
             "status": "link_generated",
-            "calendar_url": calendar_url,  # Clean URL for markdown links
+            "calendar_url": calendar_url,
+            "calendar_link_html": f'<a href="{calendar_url}" target="_blank" rel="noopener noreferrer">📅 Click here to add to Google Calendar</a>',
             "title": title,
             "start_time": start_time,
             "duration_minutes": duration_minutes,
