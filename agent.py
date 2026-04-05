@@ -297,23 +297,30 @@ If you find a task that needs scheduling:
    - attendees: "john@example.com,sarah@company.com" (comma-separated emails)
    - description: "Scheduled from meeting transcript"
 
-3. The function returns result["calendar_link_html"]. Format your output:
+3. Format your output EXACTLY as shown below:
 
-   📅 **[Event title]** - [Date] at [Time] IST
-   {result["calendar_link_html"]}
+   CRITICAL: Output result["calendar_link_html"] on its own line WITHOUT quotes, escaping, or modification!
 
-   Example output:
-   📅 **Design Review** - Monday, April 6, 2026 at 10:00 AM IST
-   <a href="https://calendar.google.com/..." target="_blank" rel="noopener noreferrer">📅 Click here to add to Google Calendar</a>
+   Exact structure (replace placeholders with actual values):
+   📅 [event title] - [day of week], [month] [date], [year] at [time] IST
+   [result["calendar_link_html"] - output this markdown link as-is]
+
+   Example output for Monday meeting:
+   📅 Design Review - Monday, April 6, 2026 at 10:00 AM IST
+   [📅 Click here to add to Google Calendar](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Design%20Review&dates=20260406T043000Z/20260406T053000Z&details=Created+by+MeetingMind) _(Ctrl+Click or Cmd+Click to open in new tab)_
+
+   Example output for Friday meeting:
+   📅 Q4 Planning - Friday, April 10, 2026 at 2:00 PM IST
+   [📅 Click here to add to Google Calendar](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Q4%20Planning&dates=20260410T083000Z/20260410T093000Z&details=Created+by+MeetingMind) _(Ctrl+Click or Cmd+Click to open in new tab)_
 
 If NO tasks need scheduling, return empty string: ""
 
-IMPORTANT:
+CRITICAL RULES:
 - Only schedule if date AND time are clearly specified
 - Attendees should be email addresses (use @example.com if only names given)
 - If uncertain about date/time, don't schedule
 - If nothing to schedule, return empty string
-- Output result["calendar_link_html"] EXACTLY as-is (it's pre-formatted HTML)
+- Output the <a> HTML tag EXACTLY as returned by the tool (no quotes, no escaping, no markdown)
 
 Return empty string if no events scheduled, otherwise return formatted confirmation.
 """,
@@ -773,54 +780,63 @@ When create_calendar_event is called, it returns a dict with:
 - result["calendar_url"]: Direct Google Calendar link
 - result["calendar_link_html"]: Pre-formatted HTML link with target="_blank"
 
-Format your output EXACTLY like this (with blank lines):
+CRITICAL: You MUST format the output EXACTLY as shown below. Do NOT deviate!
 
-**📅 Calendar Event Ready**
+STEP-BY-STEP OUTPUT CONSTRUCTION:
+1. Write the header: "📅 Calendar Event Ready" with blank line after
+2. Write event title and date/time with blank line after
+3. Write attendees with blank line after
+4. Output result["calendar_link_html"] on its own line (no quotes, no escaping, no markdown conversion)
 
-**{result["title"]}** - {human-readable date} at {human-readable time} IST
-Attendees: {comma-separated result["attendees"]}
+OUTPUT STRUCTURE (replace square brackets with actual values):
+📅 Calendar Event Ready
 
-{result["calendar_link_html"]}
+[event title] - [day], [month] [date], [year] at [time] IST
+Attendees: [comma-separated emails]
 
-CRITICAL RULES:
-1. Convert start_time to readable format: "2026-04-07 14:00" → "Tuesday, April 7, 2026 at 2:00 PM IST"
-2. Display result["calendar_link_html"] EXACTLY as-is on its own line
-3. Do NOT modify, escape, or wrap the HTML
-4. Do NOT add quotes around it
-5. Do NOT convert it to markdown
+[result["calendar_link_html"] - output the markdown link exactly as returned by the tool]
 
-CRITICAL FORMATTING:
-1. Convert start_time to readable format:
-   "2026-04-07 14:00" → "Tuesday, April 7, 2026 at 2:00 PM IST"
-2. Use proper line breaks between sections
-3. Bold the heading: **📅 Calendar Event Ready**
-4. Display markdown_link as-is (it's already HTML)
+CRITICAL RULES FOR result["calendar_link_html"]:
+1. It is ALREADY a markdown link in format: [text](url) _(Ctrl+Click or Cmd+Click to open in new tab)_
+2. Output it EXACTLY as-is on its own line
+3. Do NOT wrap in quotes ❌
+4. Do NOT modify the link text or URL ❌
+5. Do NOT remove the instruction text at the end ❌
+6. The result["calendar_link_html"] value contains the COMPLETE clickable link with user instructions
 
-EXAMPLES:
+CORRECT OUTPUT EXAMPLES:
 
-✅ CORRECT (Tuesday example):
-**📅 Calendar Event Ready**
+Example 1 - Tuesday:
+📅 Calendar Event Ready
 
-**Demo** - Tuesday, April 7, 2026 at 2:00 PM IST
+Demo - Tuesday, April 7, 2026 at 2:00 PM IST
+Attendees: test@test.com
+
+[📅 Click here to add to Google Calendar](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Demo&dates=20260407T083000Z/20260407T093000Z&details=Created+by+MeetingMind&add=test@test.com) _(Ctrl+Click or Cmd+Click to open in new tab)_
+
+Example 2 - Friday:
+📅 Calendar Event Ready
+
+Meeting - Friday, April 10, 2026 at 2:00 PM IST
 Attendees: s@s.com
 
-<a href="https://calendar.google.com/calendar/render?action=TEMPLATE&text=Demo&dates=20260407T083000Z/20260407T093000Z&details=Created+by+MeetingMind&add=s@s.com" target="_blank" rel="noopener noreferrer">📅 Click here to add to Google Calendar</a>
+[📅 Click here to add to Google Calendar](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Meeting&dates=20260410T083000Z/20260410T093000Z&details=Created+by+MeetingMind&add=s@s.com) _(Ctrl+Click or Cmd+Click to open in new tab)_
 
-✅ CORRECT (Friday example):
-**📅 Calendar Event Ready**
+WRONG OUTPUTS (DO NOT DO THESE):
 
-**Demo** - Friday, April 10, 2026 at 2:00 PM IST
-Attendees: s@s.com
+❌ Wrong: Quoted markdown
+"[📅 Click here...](url)"
 
-<a href="https://calendar.google.com/calendar/render?action=TEMPLATE&text=Demo&dates=20260410T083000Z/20260410T093000Z&details=Created+by+MeetingMind&add=s@s.com" target="_blank" rel="noopener noreferrer">📅 Click here to add to Google Calendar</a>
+❌ Wrong: Removing the instruction text
+[📅 Click here to add to Google Calendar](url)  ← Missing the Ctrl+Click instruction!
 
-❌ WRONG (everything on one line):
+❌ Wrong: Converting to HTML
+<a href="url">text</a>
+
+❌ Wrong: Everything on one line
 Calendar Event Ready Demo - Friday, April 10, 2026 at 2:00 PM IST Attendees: s@s.com
 
-❌ WRONG (modifying the HTML):
-[Click here...](url) ← Don't convert to markdown!
-"<a href=..." ← Don't add quotes!
-&lt;a href=... ← Don't escape the HTML!
+THE MARKDOWN LINK MUST APPEAR EXACTLY AS THE TOOL RETURNS IT!
 
 ═══════════════════════════════════════════
 """,
@@ -1020,30 +1036,39 @@ GENERAL BEHAVIOR:
 
 👋 **Welcome to MeetingMind!**
 
-I'm an AI assistant powered by 8 specialized agents that help you manage meetings and tasks.
+I'm an AI productivity assistant powered by **9 specialized agents** that help you manage meetings, tasks, and schedules.
 
 **What I can do:**
 
-📝 **Process transcripts** → Extract tasks, schedule events, store insights
-   • Paste any meeting transcript and I'll analyze it automatically
+📝 **Process meeting transcripts** → Extract action items, schedule events, save insights
+   • Paste any meeting transcript (500+ chars) and I'll process it in ~10 seconds
+   • Automatically detects duplicates and prevents double-saving
 
-📅 **Setup meetings** → Create calendar events with Google Meet links
-   • "Schedule Q4 planning on April 10th at 2pm with john@example.com"
+📅 **Schedule meetings intelligently** → Create calendar events with smart date parsing
+   • "Schedule demo on Tuesday at 2pm with sarah@example.com" (opens in new tab!)
+   • Supports: "tomorrow", "next Monday", "April 10th", etc.
+   • Timezone: IST (Asia/Kolkata) by default
 
-🔍 **Query tasks** → Filter by status, owner, or priority
-   • "What tasks are pending?"
-   • "Show me completed tasks"
-   • "List John's high priority tasks"
+🔍 **Query your data** → Find tasks, meetings, and notes with fuzzy search
+   • "List all meetings" → See everything you've captured
+   • "Show tasks from Q3 Product meeting" → Smart keyword matching
+   • "What high priority tasks are pending?" → Filtered results
 
-✅ **Execute commands** → Update task status or schedule meetings
-   • "Mark task 'API implementation' as done"
-   • "Set staging task to in progress"
+✅ **Execute commands** → Update task status instantly
+   • "Mark API implementation task as done"
+   • "Set staging deployment to in progress"
 
-💾 **Remember context** → Store preferences and information
-   • "Remember Alex prefers morning meetings"
+💾 **Remember context** → Store preferences for future sessions
+   • "Remember Sarah prefers morning meetings"
    • "Note that client deadline is June 30th"
 
-**Get started:** Paste a meeting transcript (500+ characters) and I'll process it in ~10 seconds!
+**🆕 New Features:**
+- ✨ Fuzzy meeting search ("Q3 Product" finds "Q3 Product Planning Discussion")
+- ✨ Smart date calculation (no more wrong dates!)
+- ✨ Full meeting summaries (never truncated)
+- ✨ List all meetings (discover what you have)
+
+**Get started:** Try "list all meetings" or paste a transcript!
 
 - Be conversational and helpful
 - If intent confidence is low after both passes, ask one clarifying question

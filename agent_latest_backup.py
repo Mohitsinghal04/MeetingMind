@@ -29,6 +29,7 @@ from .tools.db_tools import (
     save_memory,
     get_memory,
     get_meeting_summary,
+    list_all_meetings,
 )
 # MCP-compatible imports (HACKATHON DEMO - routes through MCP wrapper layer)
 from .tools.mcp_wrapper import (
@@ -511,6 +512,7 @@ The user has asked a question. Use your tools to find the answer.
 
 Available tools:
 - list_my_tasks: find tasks (filter by owner, priority, status, or meeting_id)
+- list_all_meetings: list ALL meetings in the database (use for "list meetings", "show all meetings", "what meetings do we have")
 - find_meeting_by_title: search for a meeting by title/keyword to get its meeting_id
 - get_meeting_summary: retrieve the FULL summary of a specific meeting (use for "summarize X meeting" queries)
 - search_related_notes: search past meeting notes
@@ -518,6 +520,30 @@ Available tools:
 
 User question:
 {user_query}
+
+═══════════════════════════════════════════
+LIST ALL MEETINGS
+═══════════════════════════════════════════
+
+When user asks to see all meetings (e.g., "list all meetings", "what meetings do we have", "show meetings"):
+
+1. Call list_all_meetings() - returns all meetings with titles and dates
+2. Format the results in a clean numbered list
+
+Example:
+User: "what meetings do you have"
+→ Call: list_all_meetings()
+→ Format output:
+
+📋 **Meetings in Database** (12 total)
+
+1. **Q3 Product Planning Discussion** - April 3, 2026
+2. **Sprint 12 Retrospective** - April 1, 2026
+3. **Q4 Budget Planning** - March 28, 2026
+4. **Design Review Meeting** - March 25, 2026
+...
+
+To see details of a specific meeting, ask: "show Q3 Product meeting summary"
 
 ═══════════════════════════════════════════
 MEETING SUMMARY QUERIES
@@ -627,7 +653,7 @@ Use 1-3 tools as needed, then provide a clear, direct answer.
 Format your response in a readable way.
 If you can't find the information, say so clearly.
 """,
-    tools=[list_my_tasks, find_meeting_by_title, get_meeting_summary, search_related_notes, get_memory],
+    tools=[list_my_tasks, list_all_meetings, find_meeting_by_title, get_meeting_summary, search_related_notes, get_memory],
     output_key="query_result"
 )
 
