@@ -31,6 +31,26 @@ MeetingMind is an intelligent productivity assistant that processes meeting tran
 - PostgreSQL database
 - gcloud CLI installed
 
+### Option A: Automated Setup (Recommended)
+
+For a complete automated setup from scratch, use the fresh start script:
+
+```bash
+bash fresh_start.sh
+```
+
+This will:
+1. Clean up any existing GCP resources
+2. Set up GCP infrastructure (Cloud SQL, Service Account, etc.)
+3. Initialize database schema
+4. Deploy to Cloud Run
+
+**Total time:** ~15-20 minutes (mostly Cloud SQL creation)
+
+---
+
+### Option B: Manual Setup
+
 ### 1. Clone Repository
 
 ```bash
@@ -267,8 +287,11 @@ meetingmind/
 ├── clear_tasks.py             # Clear database for testing
 ├── mcp_config.json            # MCP configuration
 ├── requirements.txt           # Python dependencies
+├── fresh_start.sh             # Automated complete setup (recommended)
 ├── deploy.sh                  # Cloud Run deployment
 ├── setup_gcp.sh               # GCP project setup (CHANGE PASSWORD!)
+├── enable_calendar_api.sh     # Enable Calendar API
+├── test_db_connection.sh      # Test database connection
 ├── .env                       # Environment variables
 ├── README.md                  # This file
 ├── CLAUDE.md                  # Quick start guide
@@ -428,6 +451,10 @@ To contribute:
 3. Commit changes (`git commit -m 'Add amazing feature'`)
 4. Push to branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
+
+
+Built for **Gen AI Academy APAC — Multi-Agent Systems with MCP Hackathon 2026**
+
 
 ## 🙏 Acknowledgments
 
