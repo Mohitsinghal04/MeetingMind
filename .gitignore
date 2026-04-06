@@ -1,0 +1,82 @@
+# MeetingMind .gitignore
+
+# Environment variables (contains secrets!)
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+*.whl
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+virtualenv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Backup files
+*.backup
+*.backup_*
+*.bak
+*~
+
+# Test coverage
+.coverage
+htmlcov/
+.pytest_cache/
+*.cover
+coverage.xml
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/
+
+# Google Cloud
+service-account-key.json
+credentials.json
+
+# Deployment artifacts
+.gcloudignore
+
+# Documentation artifacts (keep only essential)
+*_OLD.md
+CLEANUP_SUMMARY.md
