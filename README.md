@@ -429,20 +429,6 @@ To contribute:
 4. Push to branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
-
-## 📄 License
-
-MIT License - see [LICENSE](LICENSE) for details
-
-
-## 👥 Author
-
-**Mohit Singhal**  
-Email: singhalmohit04@gmail.com
-
-Built for **Gen AI Academy APAC — Multi-Agent Systems with MCP Hackathon 2026**
-
-
 ## 🙏 Acknowledgments
 
 - Google Agent Development Kit (ADK) team
@@ -453,7 +439,6 @@ Built for **Gen AI Academy APAC — Multi-Agent Systems with MCP Hackathon 2026*
 
 ## 📚 Additional Documentation
 
-- **[CLAUDE.md](CLAUDE.md)** - Quick start guide for Claude Code users
 - **[SAMPLE_TRANSCRIPT.md](SAMPLE_TRANSCRIPT.md)** - Demo meeting transcripts for testing
 
 
