@@ -31,7 +31,7 @@ from .tools.db_tools import (
     get_meeting_summary,
     list_all_meetings,
 )
-# MCP-compatible imports (HACKATHON DEMO - routes through MCP wrapper layer)
+# MCP-compatible imports
 from .tools.mcp_wrapper import (
     save_tasks_mcp as save_tasks,
     update_task_status_mcp as update_task_status,
@@ -44,7 +44,6 @@ from .tools.task_tools import list_my_tasks, mark_task_done, mark_task_in_progre
 from .tools.notes_tools import search_related_notes, save_meeting_note
 from .tools.date_helpers import parse_relative_date
 
-# ── SETUP ─────────────────────────────────────────────────────
 
 try:
     cloud_logging_client = google.cloud.logging.Client()
@@ -57,7 +56,6 @@ load_dotenv()
 model_name = os.getenv("MODEL", "gemini-2.5-flash")
 
 
-# ── STATE MANAGEMENT ──────────────────────────────────────────
 
 # Centralized state defaults (Issue 7 fix)
 _STATE_DEFAULTS = {
@@ -85,7 +83,6 @@ def _ensure_state_defaults(tool_context: ToolContext) -> None:
             tool_context.state[key] = default_value
 
 
-# ── STATE TOOL ────────────────────────────────────────────────
 
 def save_transcript_to_state(tool_context: ToolContext, transcript: str) -> dict:
     """Save the user's meeting transcript to shared session state for the pipeline.
@@ -163,9 +160,7 @@ def set_memory_input(tool_context: ToolContext, information: str) -> dict:
     return {"status": "success", "information": information}
 
 
-# ══════════════════════════════════════════════════════════════
 # SEQUENTIAL CHAIN — runs in order, each feeds the next
-# ══════════════════════════════════════════════════════════════
 
 summary_agent = Agent(
     name="summary_agent",
@@ -249,9 +244,7 @@ Output ONLY the task list. NO headers, NO extra formatting, just the bullet list
 )
 
 
-# ══════════════════════════════════════════════════════════════
 # PARALLEL BRANCH — all 4 run simultaneously
-# ══════════════════════════════════════════════════════════════
 
 scheduler_agent = Agent(
     name="scheduler_agent",
@@ -436,9 +429,7 @@ PRIORITIZED_TASKS: {prioritized_tasks}
 SCHEDULED_EVENTS: {scheduled_events}
 DB_RESULT: {db_result}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CRITICAL OUTPUT CONSTRAINT (ABSOLUTE REQUIREMENT):
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Your FIRST character of output MUST be: ✅
 
 If your output starts with any of these, you FAILED:
@@ -504,9 +495,7 @@ WRONG OUTPUT EXAMPLES:
 )
 
 
-# ══════════════════════════════════════════════════════════════
 # INTENT AGENTS — for follow-up conversations
-# ══════════════════════════════════════════════════════════════
 
 query_agent = Agent(
     name="query_agent",
@@ -885,9 +874,7 @@ Keep it simple and conversational.
 )
 
 
-# ══════════════════════════════════════════════════════════════
 # PIPELINE ASSEMBLY
-# ══════════════════════════════════════════════════════════════
 
 # 4-agent pipeline with REAL calendar integration!
 # action_item_priority_agent outputs markdown, scheduler creates REAL Google Calendar events
@@ -905,9 +892,7 @@ transcript_pipeline = SequentialAgent(
 )
 
 
-# ══════════════════════════════════════════════════════════════
 # ROOT AGENT — intent router and entry point
-# ══════════════════════════════════════════════════════════════
 
 root_agent = Agent(
     name="meetingmind",

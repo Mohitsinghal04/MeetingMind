@@ -2,7 +2,6 @@
 
 Use these sample transcripts to test the MeetingMind system.
 
----
 
 ## Sample 1: Q3 Product Planning Meeting (Recommended for Demo)
 
@@ -55,7 +54,6 @@ Sarah: Great. Meeting adjourned.
 - **Scheduled Meeting**: Design review on June 15, 2026 at 10:00 AM
 - **Notes**: Security critical for mobile auth, notification bugs affecting customers, launch campaign August 25th
 
----
 
 ## Sample 2: Sprint Retrospective
 
@@ -100,7 +98,6 @@ Mike: Great work everyone. See you at sprint planning on Thursday!
 - **Scheduled Meeting**: Sprint planning on Thursday
 - **Notes**: CI/CD pipeline slow (25 min builds), QA needs better test data, collaboration improved
 
----
 
 ## Sample 3: Customer Escalation Meeting
 
@@ -147,7 +144,6 @@ Everyone: Agreed. Let's do this.
   - Jennifer: Send recap email in 30 minutes
 - **Notes**: Critical issue affecting top customer, timeouts 9-11 AM PST, connection pool exhaustion suspected, customer considering switching
 
----
 
 ## Sample 4: Budget Planning Meeting
 
@@ -202,7 +198,6 @@ Robert: Great. Amanda, send me the SOC 2 audit vendor quotes by Friday so I can 
   - Diana: Include Robert in platform pricing review
 - **Notes**: $410K approved ($80K infra, $50K SOC 2, $70K contractors, $100K conferences, $50K CRM, $60K CS platform), $90K contingency buffer, ops analyst hire deferred to Q1
 
----
 
 ## Quick Test Queries
 
@@ -215,7 +210,6 @@ After processing a transcript, try these queries:
 5. **Store memory**: "Remember that DataCorp is a critical customer"
 6. **Retrieve memory**: "What do you remember about DataCorp?"
 
----
 
 ## Tips for Testing
 
@@ -226,7 +220,6 @@ After processing a transcript, try these queries:
 - **Vary language**: Test with different phrasings and styles
 - **Check duplicates**: Try processing similar transcripts to test duplicate detection
 
----
 
 ## Expected Processing Time
 

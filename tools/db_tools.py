@@ -19,8 +19,6 @@ from .metrics import timed_operation
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 
-# ── CONNECTION POOLING ────────────────────────────────────────────────
-
 # Global connection pool (initialized on first use)
 _connection_pool = None
 
@@ -60,8 +58,6 @@ def get_db_connection():
     finally:
         _connection_pool.putconn(conn)
 
-
-# ── MEETINGS ──────────────────────────────────────────────────
 
 @retry(
     stop=stop_after_attempt(3),
@@ -118,8 +114,6 @@ def save_meeting(tool_context: ToolContext, transcript: str, summary: str, meeti
         logging.error(f"Error saving meeting: {e}")
         return {"status": "error", "message": str(e)}
 
-
-# ── TASKS ─────────────────────────────────────────────────────
 
 @retry(
     stop=stop_after_attempt(3),
@@ -445,8 +439,6 @@ def update_task_status(
         return {"status": "error", "message": str(e)}
 
 
-# ── NOTES ─────────────────────────────────────────────────────
-
 def save_note(tool_context: ToolContext, title: str, content: str) -> dict:
     """Save a note to the database.
 
@@ -522,8 +514,6 @@ def search_notes(tool_context: ToolContext, query: str) -> dict:
         logging.error(f"Error searching notes: {e}")
         return {"status": "error", "message": str(e), "notes": [], "count": 0}
 
-
-# ── MEMORY ────────────────────────────────────────────────────
 
 def save_memory(tool_context: ToolContext, key: str, value: str) -> dict:
     """Save a key-value memory item for the current session.

@@ -11,7 +11,7 @@
 -- NOTE: This schema supports the MCP-wrapped database operations.
 -- MCP servers (calendar, tasks, notes) use these tables via db_tools.py
 
--- ── CREATE TABLES ────────────────────────────────────────────
+-- CREATE TABLES 
 
 CREATE TABLE IF NOT EXISTS meetings (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS memory (
     UNIQUE(session_id, key)
 );
 
--- ── INDEXES ──────────────────────────────────────────────────
+-- INDEXES ──────────────────────────────────────────────────
 
 CREATE INDEX IF NOT EXISTS idx_tasks_status   ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_owner    ON tasks(LOWER(owner));
@@ -58,7 +58,7 @@ CREATE INDEX IF NOT EXISTS idx_notes_title    ON notes(LOWER(title));
 CREATE INDEX IF NOT EXISTS idx_memory_session ON memory(session_id);
 CREATE INDEX IF NOT EXISTS idx_meetings_session ON meetings(session_id);
 
--- ── SEED DATA (for demo — makes DuplicateCheck & NotesAgent useful) ──
+-- SEED DATA (for demo — makes DuplicateCheck & NotesAgent useful) ──
 
 INSERT INTO meetings (id, transcript, summary, session_id, created_at)
 VALUES (
@@ -137,7 +137,7 @@ VALUES
     )
 ON CONFLICT (session_id, key) DO NOTHING;
 
--- ── VERIFY ───────────────────────────────────────────────────
+-- VERIFY 
 
 SELECT 'meetings' as table_name, COUNT(*) as rows FROM meetings
 UNION ALL

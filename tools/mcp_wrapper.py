@@ -1,7 +1,6 @@
 """
-MeetingMind — MCP Integration Layer (HACKATHON DEMO)
-Demonstrates MCP architecture by wrapping DB operations with logging.
-For competition: shows MCP-compatible interface with actual functionality.
+MeetingMind — MCP Integration Layer
+Provides MCP-compatible interface for task, calendar, and notes operations.
 """
 
 import logging
@@ -21,9 +20,7 @@ from .calendar_tools import create_calendar_event as calendar_create_event
 logging.info("🔧 MCP Integration Layer initialized (calls routed through MCP-compatible interface)")
 
 
-# ══════════════════════════════════════════════════════════════
 # MCP-COMPATIBLE TASK OPERATIONS
-# ══════════════════════════════════════════════════════════════
 
 def save_tasks_mcp(tool_context: ToolContext, tasks_json: str, skip_duplicate_check: bool = False) -> dict:
     """Save tasks via MCP-compatible interface with duplicate checking.
@@ -81,13 +78,11 @@ def update_task_status_mcp(
     result["mcp_layer"] = "MCP-compatible interface"
     result["architecture"] = "Agent → MCP Wrapper → PostgreSQL"
 
-    logging.info(f"✅ [MCP Layer] update_task_status completed")
+    logging.info("✅ [MCP Layer] update_task_status completed")
     return result
 
 
-# ══════════════════════════════════════════════════════════════
 # MCP-COMPATIBLE NOTE OPERATIONS
-# ══════════════════════════════════════════════════════════════
 
 def save_note_mcp(tool_context: ToolContext, title: str, content: str) -> dict:
     """Save note via MCP-compatible interface."""
@@ -97,7 +92,7 @@ def save_note_mcp(tool_context: ToolContext, title: str, content: str) -> dict:
     result["mcp_layer"] = "MCP-compatible interface"
     result["architecture"] = "Agent → MCP Wrapper → PostgreSQL"
 
-    logging.info(f"✅ [MCP Layer] save_note completed")
+    logging.info("✅ [MCP Layer] save_note completed")
     return result
 
 
@@ -113,9 +108,7 @@ def search_notes_mcp(tool_context: ToolContext, query: str) -> dict:
     return result
 
 
-# ══════════════════════════════════════════════════════════════
 # MCP-COMPATIBLE CALENDAR OPERATIONS
-# ══════════════════════════════════════════════════════════════
 
 def create_calendar_event_mcp(
     tool_context: ToolContext,
@@ -132,34 +125,8 @@ def create_calendar_event_mcp(
     result["mcp_layer"] = "MCP-compatible interface"
     result["architecture"] = "Agent → MCP Wrapper → Google Calendar API"
 
-    logging.info(f"✅ [MCP Layer] create_calendar_event completed")
+    logging.info("✅ [MCP Layer] create_calendar_event completed")
     return result
-
-
-# ══════════════════════════════════════════════════════════════
-# HACKATHON DEMO INFO
-# ══════════════════════════════════════════════════════════════
-
-MCP_DEMO_INFO = {
-    "architecture": "Multi-Agent System with MCP Integration",
-    "layers": [
-        "1. User Input → Root Agent (Intent Detection)",
-        "2. Root Agent → Specialized Agents (Summary, Tasks, Calendar)",
-        "3. Specialized Agents → MCP Wrapper Layer",
-        "4. MCP Wrapper → Database/APIs (PostgreSQL, Google Calendar)"
-    ],
-    "mcp_servers_available": [
-        "tasks_mcp_server.py - Task management operations",
-        "calendar_mcp_server.py - Calendar event creation",
-        "notes_mcp_server.py - Notes search and storage"
-    ],
-    "benefits": [
-        "Decoupled architecture (agents don't directly call DB)",
-        "MCP layer allows swapping backends without changing agents",
-        "Logging at MCP layer provides observability",
-        "Demonstrates Model Context Protocol pattern"
-    ]
-}
 
 
 __all__ = [
@@ -168,6 +135,5 @@ __all__ = [
     "update_task_status_mcp",
     "save_note_mcp",
     "search_notes_mcp",
-    "create_calendar_event_mcp",
-    "MCP_DEMO_INFO"
+    "create_calendar_event_mcp"
 ]
