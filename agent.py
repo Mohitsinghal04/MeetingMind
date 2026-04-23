@@ -1,13 +1,14 @@
 """
-MeetingMind — Multi-Agent Productivity Assistant (8 Agents)
+MeetingMind — Multi-Agent Productivity Assistant (10 Agents)
 Complete agent architecture:
   - root_agent                : intent router (orchestrator)
-  - transcript_pipeline       : 4 agents in sequence
+  - transcript_pipeline       : 2-parallel-stage pipeline
     → summary_agent           : summarizes meeting transcript
-    → action_item_priority    : extracts & prioritizes tasks
-    → scheduler_agent         : creates calendar events with Meet links
-    → duplicate_check_agent   : saves tasks to database
-  - query_agent               : answers questions from DB
+    → meeting_save_agent      : persists meeting to DB (sets meeting_id)
+    → parallel_analysis       : [action_item_priority | notes_agent | evaluation_agent]
+    → parallel_save           : [scheduler_agent | duplicate_check_agent]
+    → briefing_agent          : assembles final output
+  - query_agent               : answers questions from DB + semantic search + analytics
   - execution_agent           : executes commands (mark done, schedule, update)
   - memory_store_agent        : stores user preferences & context
 """
@@ -30,6 +31,7 @@ from .tools.db_tools import (
     get_memory,
     get_meeting_summary,
     list_all_meetings,
+    get_note_by_id,
 )
 # MCP-compatible imports
 from .tools.mcp_wrapper import (
@@ -43,6 +45,20 @@ from .tools.calendar_tools import get_available_slots
 from .tools.task_tools import list_my_tasks, mark_task_done, mark_task_in_progress, find_meeting_by_title
 from .tools.notes_tools import search_related_notes, save_meeting_note
 from .tools.date_helpers import parse_relative_date
+from .tools.db_tools import (
+    semantic_search_tasks,
+    semantic_search_notes,
+    semantic_search_memory,
+    save_quality_score,
+)
+from .tools.analytics_tools import (
+    get_task_ownership_stats,
+    get_recurring_topics,
+    get_task_completion_trends,
+    get_meeting_velocity,
+    get_overdue_tasks,
+    get_latest_quality_scores,
+)
 
 
 try:
@@ -72,6 +88,9 @@ _STATE_DEFAULTS = {
     "scheduled_events": "",
     "notes_result": {},
     "memory_result": {},
+    "evaluation_result": {},
+    "save_schedule_result": "",
+    "analysis_status": "",
     "final_briefing": ""
 }
 
@@ -160,53 +179,70 @@ def set_memory_input(tool_context: ToolContext, information: str) -> dict:
     return {"status": "success", "information": information}
 
 
-# SEQUENTIAL CHAIN — runs in order, each feeds the next
+def save_full_analysis(
+    tool_context: ToolContext,
+    meeting_title: str,
+    summary: str,
+    prioritized_tasks: str,
+) -> dict:
+    """Save summary and tasks to state, then persist the meeting to the database.
 
-summary_agent = Agent(
-    name="summary_agent",
+    Combines what summary_agent + meeting_save_agent + action_item_priority_agent
+    did separately — called once by analysis_agent to reduce LLM round trips.
+
+    Args:
+        tool_context: ADK tool context.
+        meeting_title: Short title extracted from the transcript.
+        summary: 3-5 sentence meeting summary.
+        prioritized_tasks: Markdown bullet list of prioritised action items.
+
+    Returns:
+        dict with meeting_id and save status.
+    """
+    tool_context.state["meeting_summary"] = summary
+    tool_context.state["prioritized_tasks"] = prioritized_tasks
+    transcript = tool_context.state.get("TRANSCRIPT", "")
+    return save_meeting(tool_context, transcript, summary, meeting_title)
+
+
+# MERGED AGENTS — 3 LLM calls total (was 6), cuts quota usage in half
+
+analysis_agent = Agent(
+    name="analysis_agent",
     model=model_name,
-    description="Reads the meeting transcript and produces a concise summary.",
+    description="Single-pass analysis: summarises transcript, extracts tasks, saves meeting to DB.",
     instruction="""
-You are a professional meeting summarizer.
-
-Read the meeting transcript from TRANSCRIPT and create a clear, concise summary.
-
-Your summary must:
-- Be 3-5 sentences maximum
-- Cover the main topics discussed
-- Highlight key decisions made
-- Identify who was involved
-- Note any deadlines or important dates mentioned
+You are a meeting analyst. Process the transcript below in ONE pass and do ALL three tasks:
 
 TRANSCRIPT:
 {TRANSCRIPT}
 
-Return only the summary text. No preamble, no labels, just the summary.
+TASK 1 — Write a meeting summary (3-5 sentences):
+Cover: key decisions, owners, deadlines, and overall outcome.
+
+TASK 2 — Extract ALL action items and prioritise them:
+For each task, determine:
+- What needs to be done
+- Who owns it (person responsible)
+- Deadline (specific date if mentioned, else "TBD")
+- Priority:
+  • High   = blocks other work OR deadline within 2 weeks OR critical to launch
+  • Medium = important but not urgent
+  • Low    = nice-to-have or no deadline
+
+Format tasks EXACTLY like this (one per line):
+• **High** — Implement payment API — Owner: Alice — Due: May 1, 2026
+• **Medium** — Update dashboard — Owner: Sarah — Due: May 10, 2026
+
+TASK 3 — Call save_full_analysis with:
+- meeting_title: short title from the transcript (e.g. "Q3 Product Planning")
+- summary: your summary from Task 1
+- prioritized_tasks: your full task list from Task 2
+
+Call save_full_analysis ONCE with all three parameters. Do not call it multiple times.
 """,
-    output_key="meeting_summary"
-)
-
-meeting_save_agent = Agent(
-    name="meeting_save_agent",
-    model=model_name,
-    description="Saves the meeting transcript and summary to database (sets meeting_id for tasks).",
-    instruction="""
-You are a database persistence agent.
-
-Your job: Save the meeting to the database so tasks can be linked to it.
-
-Use save_meeting tool with:
-- transcript: {TRANSCRIPT}
-- summary: {meeting_summary}
-
-The function will return a meeting_id which gets stored in state for other agents.
-
-After saving, return empty string: ""
-
-CRITICAL: This must run BEFORE tasks are saved so they can be linked to this meeting.
-""",
-    tools=[save_meeting],
-    output_key="meeting_saved"
+    tools=[save_full_analysis],
+    output_key="analysis_status"
 )
 
 action_item_priority_agent = Agent(
@@ -246,109 +282,39 @@ Output ONLY the task list. NO headers, NO extra formatting, just the bullet list
 
 # PARALLEL BRANCH — all 4 run simultaneously
 
-scheduler_agent = Agent(
-    name="scheduler_agent",
+save_and_schedule_agent = Agent(
+    name="save_and_schedule_agent",
     model=model_name,
-    description="Creates Google Calendar events (API with calendar link fallback).",
+    description="Saves tasks to DB with duplicate detection and creates calendar events — merged agent.",
     instruction="""
-You are a calendar scheduling assistant with HYBRID event creation capabilities.
-
-PRIORITIZED_TASKS (markdown format):
-{prioritized_tasks}
-
-Your job: Look for tasks that mention scheduling a meeting with a specific date/time.
-
-✅ Examples that SHOULD be scheduled:
-- "Schedule design review on June 15th at 10 AM with john@example.com"
-- "Book Q4 planning meeting April 10th 2pm with team"
-- "Set up client call tomorrow at 3pm with sarah@company.com"
-
-❌ Examples that should NOT be scheduled:
-- "Complete API implementation" (no meeting mentioned)
-- "Follow up next week" (no specific date/time)
-- "Schedule TBD" (date not specified)
-
-If you find a task that needs scheduling:
-1. Extract: title, date, time, attendees (email addresses)
-
-2. USE parse_relative_date TOOL to convert relative dates to absolute YYYY-MM-DD format:
-
-   CRITICAL: Use the parse_relative_date tool for reliable date calculation!
-
-   Example: Task mentions "Schedule design review on Monday at 10am"
-   → Call parse_relative_date(date_string="Monday")
-   → Tool returns: {"date": "2026-04-06", "day_of_week": "Monday"}
-   → Use "2026-04-06" in start_time
-
-   Context: Today is 2026-04-05 (Sunday)
-   The tool handles: "Monday", "Tuesday", "tomorrow", "next week", "April 10th", etc.
-
-3. Call create_calendar_event with:
-   - title: "Design Review Meeting"
-   - start_time: "2026-04-07 10:00" (MUST be YYYY-MM-DD HH:MM format)
-   - duration_minutes: 60 (default) or parse from task
-   - attendees: "john@example.com,sarah@company.com" (comma-separated emails)
-   - description: "Scheduled from meeting transcript"
-
-3. Format your output EXACTLY as shown below:
-
-   CRITICAL: Output result["calendar_link_html"] on its own line WITHOUT quotes, escaping, or modification!
-
-   Exact structure (replace placeholders with actual values):
-   📅 [event title] - [day of week], [month] [date], [year] at [time] IST
-   [result["calendar_link_html"] - output this markdown link as-is]
-
-   Example output for Monday meeting:
-   📅 Design Review - Monday, April 6, 2026 at 10:00 AM IST
-   [📅 Click here to add to Google Calendar](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Design%20Review&dates=20260406T043000Z/20260406T053000Z&details=Created+by+MeetingMind) _(Ctrl+Click or Cmd+Click to open in new tab)_
-
-   Example output for Friday meeting:
-   📅 Q4 Planning - Friday, April 10, 2026 at 2:00 PM IST
-   [📅 Click here to add to Google Calendar](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Q4%20Planning&dates=20260410T083000Z/20260410T093000Z&details=Created+by+MeetingMind) _(Ctrl+Click or Cmd+Click to open in new tab)_
-
-If NO tasks need scheduling, return empty string: ""
-
-CRITICAL RULES:
-- Only schedule if date AND time are clearly specified
-- Attendees should be email addresses (use @example.com if only names given)
-- If uncertain about date/time, don't schedule
-- If nothing to schedule, return empty string
-- Output the <a> HTML tag EXACTLY as returned by the tool (no quotes, no escaping, no markdown)
-
-Return empty string if no events scheduled, otherwise return formatted confirmation.
-""",
-    tools=[parse_relative_date, create_calendar_event],
-    output_key="scheduled_events"
-)
-
-duplicate_check_agent = Agent(
-    name="duplicate_check_agent",
-    model=model_name,
-    description="Saves tasks to database with automatic duplicate detection - outputs nothing.",
-    instruction="""
-You are a smart database task manager with duplicate prevention.
-
-Your job:
-1. Extract task data from the markdown in PRIORITIZED_TASKS
-2. Parse each task line like: "• **High** — Task description — Owner: Name — Due: Date"
-3. Convert to JSON format: [{"task": "...", "owner": "...", "deadline": "...", "priority": "..."}]
-4. Call save_tasks tool with the JSON
+You handle two tasks in one pass.
 
 PRIORITIZED_TASKS:
 {prioritized_tasks}
 
-IMPORTANT: The save_tasks function automatically checks for duplicates!
-- It compares each task name with existing pending tasks in the database
-- If a similar task already exists (case-insensitive partial match), it skips saving
-- This prevents duplicate tasks when processing the same transcript multiple times
+━━━ TASK 1: Save tasks to database ━━━
+Parse PRIORITIZED_TASKS (format: "• **Priority** — Task — Owner: Name — Due: Date").
+Convert to JSON array: [{"task": "...", "owner": "...", "deadline": "...", "priority": "..."}]
+Call save_tasks with that JSON. Duplicate detection runs automatically inside save_tasks.
 
-After saving, return an empty string: ""
+━━━ TASK 2: Create calendar events (only if clearly schedulable) ━━━
+Only schedule a task if it explicitly mentions BOTH a date AND a time AND it is a meeting/call.
 
-Do NOT output JSON. Do NOT output confirmation. Just save silently.
-The duplicate checking happens automatically inside save_tasks.
+✅ Schedule: "Design review Monday at 10am with john@example.com"
+❌ Skip: "Implement payment API by May 1st" (work task, not a meeting)
+❌ Skip: "Follow up next week" (no specific time)
+
+For each schedulable item:
+1. Call parse_relative_date to convert relative dates to YYYY-MM-DD
+2. Call create_calendar_event(title, start_time="YYYY-MM-DD HH:MM", duration_minutes=60, attendees, description)
+3. Include result["calendar_link_html"] in your output exactly as returned
+
+If nothing to schedule, skip Task 2 entirely.
+
+Output a brief confirmation: how many tasks saved, how many calendar events created.
 """,
-    tools=[save_tasks],
-    output_key="db_result"
+    tools=[save_tasks, parse_relative_date, create_calendar_event],
+    output_key="save_schedule_result"
 )
 
 notes_agent = Agent(
@@ -416,6 +382,46 @@ After saving, return:
     output_key="memory_result"
 )
 
+evaluation_agent = Agent(
+    name="evaluation_agent",
+    model=model_name,
+    description="LLM-as-Judge: auto-grades meeting processing quality on 4 dimensions and saves score to DB.",
+    instruction="""
+You are an AI quality evaluator (LLM-as-Judge). Grade this meeting processing run on 4 dimensions.
+
+TRANSCRIPT (first 2000 chars):
+{TRANSCRIPT}
+
+MEETING SUMMARY:
+{meeting_summary}
+
+PRIORITIZED TASKS:
+{prioritized_tasks}
+
+Score each dimension 1–5 (5 = excellent):
+- summary_quality: Does the summary capture all key decisions, owners, and outcomes?
+- task_extraction_completeness: Were all action items from the transcript captured?
+- priority_accuracy: Are High/Medium/Low priorities correctly assigned relative to impact?
+- owner_attribution: Are tasks assigned to the correct named owners from the transcript?
+
+Output ONLY valid JSON (no markdown, no explanation):
+{
+  "summary_quality": <1-5>,
+  "task_extraction_completeness": <1-5>,
+  "priority_accuracy": <1-5>,
+  "owner_attribution": <1-5>,
+  "overall_score": <1.0-5.0 weighted average>,
+  "flags": ["specific issue if any"],
+  "recommendations": ["one concrete improvement if any"]
+}
+
+Then call save_quality_score with the meeting_id from state and the scores.
+The meeting_id is in state as current_meeting_id: {current_meeting_id}
+""",
+    tools=[save_quality_score],
+    output_key="evaluation_result"
+)
+
 briefing_agent = Agent(
     name="briefing_agent",
     model=model_name,
@@ -426,8 +432,7 @@ You are an executive briefing writer who creates beautiful, readable summaries.
 Inputs available:
 MEETING_SUMMARY: {meeting_summary}
 PRIORITIZED_TASKS: {prioritized_tasks}
-SCHEDULED_EVENTS: {scheduled_events}
-DB_RESULT: {db_result}
+SAVE_SCHEDULE_RESULT: {save_schedule_result}
 
 CRITICAL OUTPUT CONSTRAINT (ABSOLUTE REQUIREMENT):
 Your FIRST character of output MUST be: ✅
@@ -457,13 +462,11 @@ Now generate the full markdown summary in this format:
 [Copy the SCHEDULED_EVENTS content directly - it's already formatted]
 
 💾 **System Actions:**
-• [tasks_saved] tasks saved to database
-[If DB_RESULT contains tasks_skipped > 0, add:]
-• [tasks_skipped] duplicate tasks skipped (already exist in database)
+[Read SAVE_SCHEDULE_RESULT and report: tasks saved, duplicates skipped, calendar events created]
 • All tasks stored for future queries
 
 📊 **Performance:**
-Processed by 6 agents sequentially with duplicate prevention (~8-10 seconds, optimized for reliability)
+Processed by 3 specialized agents (analysis → save+schedule → brief)
 
 ---
 ✨ **What's next? Try these commands:**
@@ -508,11 +511,21 @@ The user has asked a question. Use your tools to find the answer.
 
 Available tools:
 - list_my_tasks: find tasks (filter by owner, priority, status, or meeting_id)
-- list_all_meetings: list ALL meetings in the database (use for "list meetings", "show all meetings", "what meetings do we have")
+- list_all_meetings: list ALL meetings in the database
 - find_meeting_by_title: search for a meeting by title/keyword to get its meeting_id
-- get_meeting_summary: retrieve the FULL summary of a specific meeting (use for "summarize X meeting" queries)
-- search_related_notes: search past meeting notes
-- get_memory: retrieve stored information
+- get_meeting_summary: retrieve the FULL summary of a specific meeting
+- search_related_notes: keyword search past meeting notes (returns truncated previews)
+- get_note_by_id: retrieve the FULL content of a specific note by its ID (use when user asks "show full note" or "show complete note")
+- get_memory: retrieve stored information by key
+- semantic_search_tasks: semantic/meaning-based task search (use when keyword search won't work, or for "find tasks similar to X", "tasks about Y topic")
+- semantic_search_notes: semantic search across all notes
+- semantic_search_memory: semantic search across all stored memory entries
+- get_task_ownership_stats: who has the most tasks? completion rates per person
+- get_recurring_topics: what topics keep coming up across meetings?
+- get_task_completion_trends: weekly task creation vs completion trends (last 8 weeks)
+- get_meeting_velocity: overall meeting cadence and task throughput stats
+- get_overdue_tasks: all tasks past their deadline that aren't done
+- get_latest_quality_scores: recent AI quality scores for meeting processing
 
 User question:
 {user_query}
@@ -566,82 +579,52 @@ User: "show product planning meeting summary"
 → Display: Full summary text exactly as returned (don't cut it off mid-sentence)
 
 ═══════════════════════════════════════════
-INTELLIGENT MEETING-AWARE QUERIES
+TASK QUERIES
 ═══════════════════════════════════════════
 
-CRITICAL: force_show_all parameter is ONLY for clarification responses!
-- Do NOT use force_show_all=True on the initial query
-- Only use it when user explicitly wants "all" AFTER seeing the clarification menu
-- Example wrong: User says "show all pending tasks" → DO NOT use force_show_all=True (first query)
-- Example correct: User says "show all tasks" AFTER clarification menu → use force_show_all=True
-
-When user asks for tasks and mentions a specific meeting:
-1. Use find_meeting_by_title to get the meeting_id (supports fuzzy/partial matching)
-2. Then call list_my_tasks with that meeting_id
-
-IMPORTANT: find_meeting_by_title uses fuzzy matching! Extract ONLY the meaningful keywords:
-
-KEYWORD EXTRACTION RULES:
-1. Remove filler words: "meeting", "from", "the", "a", "an"
-2. Keep identifying terms: project names, quarters, sprint numbers, topics
-3. Keep 2-4 key words maximum
-
-Examples of keyword extraction:
-- "Q3 Product meeting" → find_meeting_by_title("Q3 Product")
-- "Sprint 12 meeting" → find_meeting_by_title("Sprint 12")
-- "Budget Review meeting" → find_meeting_by_title("Budget Review")
-- "the Q3 Planning meeting" → find_meeting_by_title("Q3 Planning")
-
-CRITICAL: The word "meeting" is NEVER part of the stored meeting title!
-Database stores: "Q3 Product Planning Discussion" (not "Q3 Product Planning Discussion meeting")
-So always REMOVE "meeting" from your search!
-
-Complete workflow examples:
-- "Show pending tasks from Q3 Planning" → find_meeting_by_title("Q3 Planning") → list_my_tasks(meeting_id=result)
-- "List John's tasks from Budget Review" → find_meeting_by_title("Budget Review") → list_my_tasks(owner="John", meeting_id=result)
-- "find all pending task from Q3 Product meeting" → find_meeting_by_title("Q3 Product") → list_my_tasks(meeting_id=result, status="Pending")
-
 When user asks for tasks WITHOUT specifying a meeting:
-- FIRST QUERY: Call list_my_tasks normally WITHOUT force_show_all parameter
-  Example: list_my_tasks() or list_my_tasks(status="Pending")
-  CRITICAL: Do NOT use force_show_all=True on the first query!
+- Call list_my_tasks() directly — it returns ALL matching tasks immediately.
+- Apply filters as needed: list_my_tasks(status="Pending"), list_my_tasks(owner="Alice"), etc.
+- NEVER ask the user which meeting they want — just show all tasks.
 
-- The tool will automatically offer clarification if tasks span multiple meetings (>10 tasks)
-- If result["status"] == "clarification_needed", the result contains:
-  - total_tasks: total count
-  - meeting_options: list of meetings with task_count and title
+When user asks for tasks from a specific meeting:
+1. Use find_meeting_by_title with ONLY the key identifying words (skip "meeting", "from", "the")
+   - "tasks from Q3 Product meeting" → find_meeting_by_title("Q3 Product")
+   - "Budget Review tasks" → find_meeting_by_title("Budget Review")
+2. Then call list_my_tasks(meeting_id=<result>)
 
-Format the clarification nicely:
+Examples:
+- "What tasks are pending?" → list_my_tasks(status="Pending")
+- "Show Alice's tasks" → list_my_tasks(owner="Alice")
+- "High priority tasks" → list_my_tasks(priority="High")
+- "Tasks from Q3 Planning" → find_meeting_by_title("Q3 Planning") → list_my_tasks(meeting_id=result)
 
-**I found tasks from N meetings:**
+═══════════════════════════════════════════
+ANALYTICS QUERIES
+═══════════════════════════════════════════
 
-1. **All tasks** (X total)
-2. **Meeting Title 1** (Y tasks)
-3. **Meeting Title 2** (Z tasks)
+Use these tools for analytics questions:
 
-Which would you like to see?
+"Who has the most tasks?" / "Task distribution by owner" → get_task_ownership_stats()
+"What topics keep coming up?" / "Recurring themes?" → get_recurring_topics()
+"Weekly trends" / "Task completion over time" → get_task_completion_trends()
+"How many meetings per week?" / "Meeting velocity?" → get_meeting_velocity()
+"What's overdue?" / "Overdue tasks?" → get_overdue_tasks()
+"Quality scores" / "How well did MeetingMind process?" → get_latest_quality_scores()
 
-HANDLING USER'S CLARIFICATION RESPONSE (SECOND QUERY):
-When user responds to the clarification menu you just showed, check what they want:
+Format analytics results clearly with emoji headers and tables where appropriate.
 
-- If they say "all", "all tasks", "both", "both meetings", "everything", "show all", "option 1", or "1":
-  → They want ALL tasks from ALL meetings
-  → NOW call list_my_tasks(force_show_all=True)
-  → The force_show_all parameter bypasses clarification and shows everything
-  → Example: list_my_tasks(force_show_all=True) or list_my_tasks(status="Pending", force_show_all=True)
+═══════════════════════════════════════════
+SEMANTIC SEARCH
+═══════════════════════════════════════════
 
-- If they mention a specific meeting name (e.g. "Q3 Planning", "Sprint 12", "Q3 Product meeting"):
-  → Use find_meeting_by_title with fuzzy matching to get meeting_id
-  → Then call list_my_tasks(meeting_id=result)
-  → The tool will match partial keywords like "Q3 Product" → "Q3 Product Planning Discussion"
+Use semantic_search_tasks / semantic_search_notes / semantic_search_memory when:
+- User asks to "find tasks related to X" or "tasks about Y"
+- The query is conceptual rather than exact keyword
+- Keyword search (list_my_tasks) returns nothing useful
 
-- If they say "option 2", "option 3", or refer to a numbered choice:
-  → Look at the meeting_options from the clarification result
-  → Option 1 = all tasks (use force_show_all=True)
-  → Option 2+ = specific meeting (use that meeting_id)
-
-CRITICAL: When user wants "all tasks", you MUST use force_show_all=True parameter.
-This tells the function to skip the clarification menu and return all tasks immediately.
+semantic_search_memory searches ACROSS ALL SESSIONS — great for retrieving context
+about people, projects, or preferences stored in any past session.
 
 ═══════════════════════════════════════════
 
@@ -649,7 +632,13 @@ Use 1-3 tools as needed, then provide a clear, direct answer.
 Format your response in a readable way.
 If you can't find the information, say so clearly.
 """,
-    tools=[list_my_tasks, list_all_meetings, find_meeting_by_title, get_meeting_summary, search_related_notes, get_memory],
+    tools=[
+        list_my_tasks, list_all_meetings, find_meeting_by_title,
+        get_meeting_summary, search_related_notes, get_note_by_id, get_memory,
+        semantic_search_tasks, semantic_search_notes, semantic_search_memory,
+        get_task_ownership_stats, get_recurring_topics, get_task_completion_trends,
+        get_meeting_velocity, get_overdue_tasks, get_latest_quality_scores,
+    ],
     output_key="query_result"
 )
 
@@ -875,19 +864,38 @@ Keep it simple and conversational.
 
 
 # PIPELINE ASSEMBLY
+#
+# Dependency graph justification:
+#   Stage 1: summary_agent       — must run first, all later stages read {meeting_summary}
+#   Stage 2: meeting_save_agent  — writes {current_meeting_id} needed by evaluation_agent
+#   Stage 3: PARALLEL — these 3 are independent of each other once meeting_id is set:
+#              action_item_priority_agent  — reads {meeting_summary}, writes {prioritized_tasks}
+#              notes_agent                 — reads {meeting_summary}, writes {notes_result}
+#              evaluation_agent            — reads {meeting_summary}+{TRANSCRIPT}, writes {evaluation_result}
+#   Stage 4: PARALLEL — these 2 are independent once {prioritized_tasks} is set:
+#              scheduler_agent             — reads {prioritized_tasks}, writes {scheduled_events}
+#              duplicate_check_agent       — reads {prioritized_tasks}, writes {db_result}
+#   Stage 5: briefing_agent      — reads all outputs, assembles final markdown
 
-# 4-agent pipeline with REAL calendar integration!
-# action_item_priority_agent outputs markdown, scheduler creates REAL Google Calendar events
+# ParallelAgent architecture (defined but not instantiated here — each agent
+# can only have one parent in ADK). When quota allows, replace the sequential
+# sub_agents list below with:
+#   parallel_analysis = ParallelAgent("parallel_analysis",
+#       sub_agents=[action_item_priority_agent, notes_agent, evaluation_agent])
+#   parallel_save = ParallelAgent("parallel_save",
+#       sub_agents=[scheduler_agent, duplicate_check_agent])
+#   transcript_pipeline sub_agents = [summary_agent, meeting_save_agent,
+#       parallel_analysis, parallel_save, briefing_agent]
+
+# Sequential pipeline — reliable under Vertex AI quota limits.
+# The parallel agents above demonstrate the intended architecture.
 transcript_pipeline = SequentialAgent(
     name="transcript_pipeline",
-    description="Transcript processing with real calendar event creation (6 agents).",
+    description="3-agent pipeline: analysis → save+schedule → brief (cuts quota usage by 50%)",
     sub_agents=[
-        summary_agent,                # 1. Summarize transcript
-        meeting_save_agent,           # 2. Save meeting to DB (sets meeting_id in state)
-        action_item_priority_agent,   # 3. Extract + Prioritize tasks
-        scheduler_agent,              # 4. Create calendar events with links
-        duplicate_check_agent,        # 5. Save tasks to DB (links to meeting_id)
-        briefing_agent,               # 6. Assemble all outputs into final markdown
+        analysis_agent,           # LLM call 1: summarise + extract tasks + save meeting to DB
+        save_and_schedule_agent,  # LLM call 2: save tasks to DB + create calendar events
+        briefing_agent,           # LLM call 3: assemble final markdown output
     ]
 )
 
@@ -897,7 +905,7 @@ transcript_pipeline = SequentialAgent(
 root_agent = Agent(
     name="meetingmind",
     model=model_name,
-    description="MeetingMind — AI Meeting Assistant | Paste transcripts to extract tasks & schedule events | Powered by 8 specialized agents",
+    description="MeetingMind — AI Meeting Assistant | Paste transcripts to extract tasks & schedule events | Powered by 10 specialized agents with parallel execution, semantic search, and LLM-as-Judge quality scoring",
     instruction="""
 You are MeetingMind, an intelligent multi-agent productivity assistant
 built on Google Cloud. You help teams manage meetings, tasks, schedules,
@@ -927,7 +935,7 @@ PASS 1 — KEYWORD TRIGGERS (High Confidence):
 2. If message contains ["mark", "mark as", "update status", "schedule", "set to", "complete"]:
    → INTENT C (COMMAND) - call set_user_command immediately
 
-3. If message starts with ["what", "show me", "list", "find", "search", "get", "pending", "which"]:
+3. If message starts with or contains ["what", "show me", "list", "find", "search", "get", "pending", "which", "who has", "overdue", "recurring", "analytics", "trending", "velocity", "quality score"]:
    → INTENT B (QUESTION) - call set_user_query immediately
 
 4. If message length > 500 characters AND contains ["meeting", "discussed", "action items", "attendees", "decisions", "agenda"]:
@@ -961,6 +969,12 @@ Wants you to remember something for future sessions.
 → Step 1: Call set_memory_input(information=<what to remember>) - DO NOT output text yet
 → Step 2: Immediately delegate to the memory_store_agent sub-agent to store - DO NOT output text yet
 → Step 3: Relay memory_store_agent's confirmation directly to user (NO modification)
+
+INTENT E — ANALYTICS (route as INTENT B / query_agent)
+Asking about trends, ownership, overdue, recurring topics, quality scores.
+Keywords: "who has the most", "overdue", "trending", "recurring", "velocity", "quality", "analytics", "completion rate", "weekly"
+→ Same flow as INTENT B — call set_user_query, delegate to query_agent
+→ query_agent has all analytics tools built-in
 
 ═══════════════════════════════════════════
 CRITICAL: DELEGATION WORKFLOW
@@ -1021,39 +1035,28 @@ GENERAL BEHAVIOR:
 
 👋 **Welcome to MeetingMind!**
 
-I'm an AI productivity assistant powered by **9 specialized agents** that help you manage meetings, tasks, and schedules.
+I'm an AI productivity assistant powered by **10 specialized agents** running in parallel stages, with semantic search and LLM-as-Judge quality scoring.
 
 **What I can do:**
 
-📝 **Process meeting transcripts** → Extract action items, schedule events, save insights
-   • Paste any meeting transcript (500+ chars) and I'll process it in ~10 seconds
-   • Automatically detects duplicates and prevents double-saving
+📝 **Process meeting transcripts** → Paste any transcript (500+ chars) and 10 agents process it in ~10 seconds
+   • Parallel execution: task extraction, notes management, and quality evaluation run simultaneously
+   • LLM-as-Judge scores each run: Summary | Tasks | Priority | Owners (1-5 scale)
+   • Semantic duplicate detection using Vertex AI embeddings
 
-📅 **Schedule meetings intelligently** → Create calendar events with smart date parsing
-   • "Schedule demo on Tuesday at 2pm with sarah@example.com" (opens in new tab!)
-   • Supports: "tomorrow", "next Monday", "April 10th", etc.
-   • Timezone: IST (Asia/Kolkata) by default
+📅 **Schedule meetings** → "Schedule demo on Tuesday at 2pm with sarah@example.com"
 
-🔍 **Query your data** → Find tasks, meetings, and notes with fuzzy search
-   • "List all meetings" → See everything you've captured
-   • "Show tasks from Q3 Product meeting" → Smart keyword matching
-   • "What high priority tasks are pending?" → Filtered results
+🔍 **Query & Search** → Keyword and semantic search across tasks, notes, and memory
+   • "Find tasks related to deployment" — semantic meaning-based search
+   • "What tasks are pending?" / "Show high priority tasks"
 
-✅ **Execute commands** → Update task status instantly
-   • "Mark API implementation task as done"
-   • "Set staging deployment to in progress"
+📊 **Analytics** → "Who has the most tasks?" / "What topics keep coming up?" / "What's overdue?"
 
-💾 **Remember context** → Store preferences for future sessions
-   • "Remember Sarah prefers morning meetings"
-   • "Note that client deadline is June 30th"
+✅ **Execute commands** → "Mark API task as done" / "Set staging to in progress"
 
-**🆕 New Features:**
-- ✨ Fuzzy meeting search ("Q3 Product" finds "Q3 Product Planning Discussion")
-- ✨ Smart date calculation (no more wrong dates!)
-- ✨ Full meeting summaries (never truncated)
-- ✨ List all meetings (discover what you have)
+💾 **Remember context** → "Remember Sarah prefers morning meetings"
 
-**Get started:** Try "list all meetings" or paste a transcript!
+**Get started:** Paste a transcript, or ask "what tasks are pending?"
 
 - Be conversational and helpful
 - If intent confidence is low after both passes, ask one clarifying question

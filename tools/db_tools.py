@@ -1,6 +1,7 @@
 """
 MeetingMind — Database Tools
 All Postgres read/write operations for tasks, notes, meetings, and memory.
+Includes pgvector semantic search via Vertex AI textembedding-gecko@003.
 """
 
 import os
@@ -16,7 +17,16 @@ import psycopg2.extras
 from psycopg2.pool import ThreadedConnectionPool
 from google.adk.tools.tool_context import ToolContext
 from .metrics import timed_operation
+from .embeddings import get_embedding
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+try:
+    from pgvector.psycopg2 import register_vector as _pgvector_register
+    _PGVECTOR_AVAILABLE = True
+except ImportError:
+    _pgvector_register = None
+    _PGVECTOR_AVAILABLE = False
+    logging.warning("pgvector psycopg2 adapter not installed — vector ops disabled")
 
 
 # Global connection pool (initialized on first use)
@@ -54,6 +64,8 @@ def get_db_connection():
     _initialize_pool()
     conn = _connection_pool.getconn()
     try:
+        if _PGVECTOR_AVAILABLE:
+            _pgvector_register(conn)
         yield conn
     finally:
         _connection_pool.putconn(conn)
@@ -97,10 +109,11 @@ def save_meeting(tool_context: ToolContext, transcript: str, summary: str, meeti
                     first_line = transcript.split('\n')[0].strip()
                     meeting_title = first_line[:100] if len(first_line) > 10 else "Untitled Meeting"
 
+            embedding = get_embedding(summary)
             cur.execute(
-                """INSERT INTO meetings (id, transcript, summary, session_id, created_at)
-                   VALUES (%s, %s, %s, %s, %s)""",
-                (meeting_id, transcript, summary, session_id, datetime.utcnow())
+                """INSERT INTO meetings (id, transcript, summary, session_id, created_at, embedding)
+                   VALUES (%s, %s, %s, %s, %s, %s)""",
+                (meeting_id, transcript, summary, session_id, datetime.utcnow(), embedding)
             )
             conn.commit()
             cur.close()
@@ -161,10 +174,11 @@ def save_tasks(tool_context: ToolContext, tasks_json: str, skip_duplicate_check:
 
                 # No duplicate found - save the task
                 task_id = str(uuid.uuid4())
+                embedding = get_embedding(task_name)
                 cur.execute(
                     """INSERT INTO tasks
-                       (id, meeting_id, task_name, owner, deadline, priority, status, created_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                       (id, meeting_id, task_name, owner, deadline, priority, status, created_at, embedding)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                     (
                         task_id,
                         meeting_id,
@@ -173,7 +187,8 @@ def save_tasks(tool_context: ToolContext, tasks_json: str, skip_duplicate_check:
                         task.get("deadline", "Not specified"),
                         task.get("priority", "Medium"),
                         "Pending",
-                        datetime.utcnow()
+                        datetime.utcnow(),
+                        embedding,
                     )
                 )
                 saved_ids.append(task_id)
@@ -204,21 +219,59 @@ def save_tasks(tool_context: ToolContext, tasks_json: str, skip_duplicate_check:
 
 @timed_operation("check_duplicate_tasks")
 def check_duplicate_tasks(tool_context: ToolContext, task_name: str) -> dict:
-    """Check if a similar task already exists in the database.
+    """Check if a similar task already exists using semantic similarity (with LIKE fallback).
+
+    Tries cosine similarity via pgvector first (threshold 0.85). Falls back to
+    LIKE substring matching if embeddings are unavailable.
 
     Args:
         tool_context: ADK tool context.
         task_name: The task name to check for duplicates.
 
     Returns:
-        dict with is_duplicate flag and existing task details if found.
+        dict with is_duplicate flag, similarity score, and existing task details if found.
     """
     try:
+        # --- Semantic check (preferred) ---
+        if _PGVECTOR_AVAILABLE:
+            embedding = get_embedding(task_name)
+            if embedding is not None:
+                with get_db_connection() as conn:
+                    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+                    cur.execute(
+                        """SELECT id, task_name, owner, status, priority,
+                                  1 - (embedding <=> %s::vector) AS similarity
+                           FROM tasks
+                           WHERE status NOT IN ('Done', 'Cancelled')
+                             AND embedding IS NOT NULL
+                           ORDER BY embedding <=> %s::vector
+                           LIMIT 1""",
+                        (embedding, embedding)
+                    )
+                    row = cur.fetchone()
+                    cur.close()
+
+                if row and row["similarity"] >= 0.85:
+                    existing = dict(row)
+                    logging.info(
+                        f"Semantic duplicate found for '{task_name}': "
+                        f"'{existing['task_name']}' (similarity={existing['similarity']:.3f})"
+                    )
+                    return {
+                        "is_duplicate": True,
+                        "existing_task": existing,
+                        "similarity": round(existing["similarity"], 3),
+                        "method": "semantic",
+                        "message": (
+                            f"Similar task already exists: '{existing['task_name']}' "
+                            f"({existing['status']}, {existing['similarity']*100:.0f}% similar)"
+                        ),
+                    }
+
+        # --- LIKE fallback ---
+        search_term = task_name[:40].strip()
         with get_db_connection() as conn:
             cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-
-            # Check for similar task name (partial match, case-insensitive)
-            search_term = task_name[:40].strip()
             cur.execute(
                 """SELECT id, task_name, owner, status, priority
                    FROM tasks
@@ -230,16 +283,17 @@ def check_duplicate_tasks(tool_context: ToolContext, task_name: str) -> dict:
             result = cur.fetchone()
             cur.close()
 
-            if result:
-                existing = dict(result)
-                logging.info(f"Duplicate found for '{task_name}': {existing['task_name']}")
-                return {
-                    "is_duplicate": True,
-                    "existing_task": existing,
-                    "message": f"Similar task already exists: '{existing['task_name']}' ({existing['status']})"
-                }
+        if result:
+            existing = dict(result)
+            logging.info(f"LIKE duplicate found for '{task_name}': '{existing['task_name']}'")
+            return {
+                "is_duplicate": True,
+                "existing_task": existing,
+                "method": "substring",
+                "message": f"Similar task already exists: '{existing['task_name']}' ({existing['status']})",
+            }
 
-            return {"is_duplicate": False, "message": "No duplicate found"}
+        return {"is_duplicate": False, "message": "No duplicate found"}
 
     except Exception as e:
         logging.error(f"Error checking duplicates: {e}")
@@ -319,7 +373,8 @@ def get_pending_tasks(
     owner: Optional[str] = None,
     priority: Optional[str] = None,
     status: Optional[str] = None,
-    meeting_id: Optional[str] = None
+    meeting_id: Optional[str] = None,
+    show_all: bool = False
 ) -> dict:
     """Get tasks from the database, optionally filtered.
 
@@ -329,6 +384,7 @@ def get_pending_tasks(
         priority: Optional priority (High/Medium/Low) to filter by.
         status: Optional status to filter by. Defaults to non-Done tasks.
         meeting_id: Optional meeting ID to filter by specific meeting.
+        show_all: If True, include Done/Cancelled tasks (used by the API "All" tab).
 
     Returns:
         dict with list of tasks and count.
@@ -337,13 +393,16 @@ def get_pending_tasks(
         with get_db_connection() as conn:
             cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
 
-            query = "SELECT t.*, m.summary as meeting_summary FROM tasks t LEFT JOIN meetings m ON t.meeting_id = m.id WHERE 1=1"
+            query = """SELECT t.id, t.task_name, t.owner, t.deadline, t.priority,
+                              t.status, t.meeting_id, t.created_at,
+                              m.summary as meeting_summary
+                       FROM tasks t LEFT JOIN meetings m ON t.meeting_id = m.id WHERE 1=1"""
             params = []
 
             if status:
                 query += " AND t.status = %s"
                 params.append(status)
-            else:
+            elif not show_all:
                 query += " AND t.status != 'Done'"
 
             if owner:
@@ -358,7 +417,7 @@ def get_pending_tasks(
                 query += " AND t.meeting_id = %s"
                 params.append(meeting_id)
 
-            query += " ORDER BY t.priority = 'High' DESC, t.created_at DESC LIMIT 20"
+            query += " ORDER BY t.priority = 'High' DESC, t.created_at DESC LIMIT 100"
 
             cur.execute(query, params)
             tasks = [dict(row) for row in cur.fetchall()]
@@ -456,10 +515,11 @@ def save_note(tool_context: ToolContext, title: str, content: str) -> dict:
             note_id = str(uuid.uuid4())
             meeting_id = tool_context.state.get("current_meeting_id")
 
+            embedding = get_embedding(f"{title} {content[:500]}")
             cur.execute(
-                """INSERT INTO notes (id, title, content, meeting_id, created_at)
-                   VALUES (%s, %s, %s, %s, %s)""",
-                (note_id, title[:500], content, meeting_id, datetime.utcnow())
+                """INSERT INTO notes (id, title, content, meeting_id, created_at, embedding)
+                   VALUES (%s, %s, %s, %s, %s, %s)""",
+                (note_id, title[:500], content, meeting_id, datetime.utcnow(), embedding)
             )
             conn.commit()
             cur.close()
@@ -502,7 +562,6 @@ def search_notes(tool_context: ToolContext, query: str) -> dict:
                 for k, v in n.items():
                     if hasattr(v, "isoformat"):
                         n[k] = v.isoformat()
-                # Truncate long content for readability
                 if len(n.get("content", "")) > 300:
                     n["content"] = n["content"][:300] + "..."
 
@@ -513,6 +572,40 @@ def search_notes(tool_context: ToolContext, query: str) -> dict:
     except Exception as e:
         logging.error(f"Error searching notes: {e}")
         return {"status": "error", "message": str(e), "notes": [], "count": 0}
+
+
+def get_note_by_id(tool_context: ToolContext, note_id: str) -> dict:
+    """Retrieve the full content of a specific note by its ID.
+
+    Args:
+        tool_context: ADK tool context.
+        note_id: The UUID of the note to retrieve.
+
+    Returns:
+        dict with the full note content.
+    """
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+            cur.execute(
+                "SELECT id, title, content, created_at FROM notes WHERE id = %s",
+                (note_id,)
+            )
+            row = cur.fetchone()
+            cur.close()
+
+            if not row:
+                return {"status": "not_found", "message": f"No note found with id {note_id}"}
+
+            note = dict(row)
+            for k, v in note.items():
+                if hasattr(v, "isoformat"):
+                    note[k] = v.isoformat()
+            return {"status": "success", "note": note}
+
+    except Exception as e:
+        logging.error(f"Error fetching note {note_id}: {e}")
+        return {"status": "error", "message": str(e)}
 
 
 def save_memory(tool_context: ToolContext, key: str, value: str) -> dict:
@@ -532,13 +625,16 @@ def save_memory(tool_context: ToolContext, key: str, value: str) -> dict:
             memory_id = str(uuid.uuid4())
             session_id = tool_context.state.get("session_id", "default")
 
+            clean_key = key.lower().replace(" ", "_")
+            embedding = get_embedding(f"{clean_key}: {value}")
             cur.execute(
-                """INSERT INTO memory (id, session_id, key, value, created_at)
-                   VALUES (%s, %s, %s, %s, %s)
+                """INSERT INTO memory (id, session_id, key, value, created_at, embedding)
+                   VALUES (%s, %s, %s, %s, %s, %s)
                    ON CONFLICT (session_id, key)
                    DO UPDATE SET value = EXCLUDED.value,
-                                 created_at = EXCLUDED.created_at""",
-                (memory_id, session_id, key.lower().replace(" ", "_"), value, datetime.utcnow())
+                                 created_at = EXCLUDED.created_at,
+                                 embedding = EXCLUDED.embedding""",
+                (memory_id, session_id, clean_key, value, datetime.utcnow(), embedding)
             )
             conn.commit()
             cur.close()
@@ -722,4 +818,215 @@ def get_meeting_summary(tool_context: ToolContext, meeting_title_keyword: str) -
 
     except Exception as e:
         logging.error(f"Error getting meeting summary: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+def semantic_search_tasks(tool_context: ToolContext, query_text: str, limit: int = 5) -> dict:
+    """Find tasks semantically similar to the query using cosine similarity.
+
+    Falls back to LIKE search if pgvector is unavailable.
+
+    Args:
+        tool_context: ADK tool context.
+        query_text: Natural language query (e.g. "set up backend environment").
+        limit: Maximum results to return.
+
+    Returns:
+        dict with semantically matched tasks and similarity scores.
+    """
+    try:
+        if _PGVECTOR_AVAILABLE:
+            embedding = get_embedding(query_text)
+            if embedding is not None:
+                with get_db_connection() as conn:
+                    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+                    cur.execute(
+                        """SELECT id, task_name, owner, deadline, priority, status,
+                                  1 - (embedding <=> %s::vector) AS similarity
+                           FROM tasks
+                           WHERE status != 'Done'
+                             AND embedding IS NOT NULL
+                           ORDER BY embedding <=> %s::vector
+                           LIMIT %s""",
+                        (embedding, embedding, limit)
+                    )
+                    rows = [dict(r) for r in cur.fetchall()]
+                    cur.close()
+
+                tasks = [r for r in rows if r["similarity"] >= 0.50]
+                for t in tasks:
+                    t["similarity"] = round(t["similarity"], 3)
+                    for k, v in t.items():
+                        if hasattr(v, "isoformat"):
+                            t[k] = v.isoformat()
+
+                logging.info(f"Semantic task search '{query_text}' → {len(tasks)} results")
+                return {"status": "success", "tasks": tasks, "count": len(tasks), "method": "semantic"}
+
+        # Fallback: LIKE search
+        return _like_search_tasks(tool_context, query_text, limit)
+
+    except Exception as e:
+        logging.error(f"semantic_search_tasks error: {e}")
+        return _like_search_tasks(tool_context, query_text, limit)
+
+
+def _like_search_tasks(tool_context: ToolContext, query_text: str, limit: int) -> dict:
+    """LIKE-based fallback for task search."""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+            cur.execute(
+                """SELECT id, task_name, owner, deadline, priority, status
+                   FROM tasks
+                   WHERE LOWER(task_name) LIKE LOWER(%s) AND status != 'Done'
+                   LIMIT %s""",
+                (f"%{query_text[:40]}%", limit)
+            )
+            tasks = [dict(r) for r in cur.fetchall()]
+            cur.close()
+        for t in tasks:
+            for k, v in t.items():
+                if hasattr(v, "isoformat"):
+                    t[k] = v.isoformat()
+        return {"status": "success", "tasks": tasks, "count": len(tasks), "method": "substring"}
+    except Exception as e:
+        return {"status": "error", "message": str(e), "tasks": [], "count": 0}
+
+
+def semantic_search_notes(tool_context: ToolContext, query_text: str, limit: int = 5) -> dict:
+    """Find notes semantically similar to the query.
+
+    Args:
+        tool_context: ADK tool context.
+        query_text: Natural language query.
+        limit: Maximum results to return.
+
+    Returns:
+        dict with semantically matched notes and similarity scores.
+    """
+    try:
+        if _PGVECTOR_AVAILABLE:
+            embedding = get_embedding(query_text)
+            if embedding is not None:
+                with get_db_connection() as conn:
+                    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+                    cur.execute(
+                        """SELECT id, title, content,
+                                  1 - (embedding <=> %s::vector) AS similarity
+                           FROM notes
+                           WHERE embedding IS NOT NULL
+                           ORDER BY embedding <=> %s::vector
+                           LIMIT %s""",
+                        (embedding, embedding, limit)
+                    )
+                    rows = [dict(r) for r in cur.fetchall()]
+                    cur.close()
+
+                notes = [r for r in rows if r["similarity"] >= 0.50]
+                for n in notes:
+                    n["similarity"] = round(n["similarity"], 3)
+                    if len(n.get("content", "")) > 300:
+                        n["content"] = n["content"][:300] + "..."
+
+                logging.info(f"Semantic notes search '{query_text}' → {len(notes)} results")
+                return {"status": "success", "notes": notes, "count": len(notes), "method": "semantic"}
+
+        return search_notes(tool_context, query_text)
+
+    except Exception as e:
+        logging.error(f"semantic_search_notes error: {e}")
+        return search_notes(tool_context, query_text)
+
+
+def semantic_search_memory(tool_context: ToolContext, query_text: str, limit: int = 5) -> dict:
+    """Search memory across ALL sessions using semantic similarity.
+
+    Unlike get_memory() which is session-scoped, this searches all sessions
+    — enabling cross-session knowledge retrieval.
+
+    Args:
+        tool_context: ADK tool context.
+        query_text: Natural language query.
+        limit: Maximum results to return.
+
+    Returns:
+        dict with semantically matched memory entries and similarity scores.
+    """
+    try:
+        if _PGVECTOR_AVAILABLE:
+            embedding = get_embedding(query_text)
+            if embedding is not None:
+                with get_db_connection() as conn:
+                    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+                    cur.execute(
+                        """SELECT session_id, key, value,
+                                  1 - (embedding <=> %s::vector) AS similarity
+                           FROM memory
+                           WHERE embedding IS NOT NULL
+                           ORDER BY embedding <=> %s::vector
+                           LIMIT %s""",
+                        (embedding, embedding, limit)
+                    )
+                    rows = [dict(r) for r in cur.fetchall()]
+                    cur.close()
+
+                memories = [r for r in rows if r["similarity"] >= 0.50]
+                for m in memories:
+                    m["similarity"] = round(m["similarity"], 3)
+
+                logging.info(f"Semantic memory search '{query_text}' → {len(memories)} results")
+                return {"status": "success", "memories": memories, "count": len(memories), "method": "semantic"}
+
+        # Fallback: session-scoped exact key search
+        return get_memory(tool_context)
+
+    except Exception as e:
+        logging.error(f"semantic_search_memory error: {e}")
+        return get_memory(tool_context)
+
+
+def save_quality_score(tool_context: ToolContext, meeting_id: str, scores: dict) -> dict:
+    """Persist LLM-as-Judge quality scores for a meeting processing run.
+
+    Args:
+        tool_context: ADK tool context.
+        meeting_id: UUID of the processed meeting.
+        scores: Dict from evaluation_agent with keys: summary_quality,
+                task_extraction_completeness, priority_accuracy, owner_attribution,
+                overall_score, flags, recommendations.
+
+    Returns:
+        dict with status and score_id.
+    """
+    try:
+        import json as _json
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            score_id = str(uuid.uuid4())
+            cur.execute(
+                """INSERT INTO quality_scores
+                   (id, meeting_id, summary_quality, task_extraction_completeness,
+                    priority_accuracy, owner_attribution, overall_score, flags, recommendations)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                (
+                    score_id,
+                    meeting_id,
+                    scores.get("summary_quality"),
+                    scores.get("task_extraction_completeness"),
+                    scores.get("priority_accuracy"),
+                    scores.get("owner_attribution"),
+                    scores.get("overall_score"),
+                    _json.dumps(scores.get("flags", [])),
+                    _json.dumps(scores.get("recommendations", [])),
+                )
+            )
+            conn.commit()
+            cur.close()
+
+        logging.info(f"Quality score saved: {score_id} overall={scores.get('overall_score')}")
+        return {"status": "success", "score_id": score_id}
+
+    except Exception as e:
+        logging.error(f"save_quality_score error: {e}")
         return {"status": "error", "message": str(e)}

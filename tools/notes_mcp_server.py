@@ -1,17 +1,15 @@
 """
 MeetingMind — Notes MCP Server
 Exposes notes management tools via MCP protocol.
-Wraps existing DB operations to provide MCP interface.
+Wraps real DB operations via MCP interface.
 """
 
 import asyncio
-import os
 import logging
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
-# Initialize MCP server
 server = Server("notes-mcp")
 
 logging.basicConfig(level=logging.INFO)
@@ -94,104 +92,50 @@ async def list_tools() -> list[Tool]:
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-    """Handle tool calls by wrapping DB operations."""
+    """Handle tool calls via REAL DB operations."""
+
+    from .db_tools import search_notes as db_search_notes, save_note as db_save_note
+    from .notes_tools import search_related_notes, save_meeting_note
+
+    class MockToolContext:
+        def __init__(self):
+            self.state = {
+                "session_id": "mcp_session",
+                "current_meeting_id": arguments.get("meeting_id")
+            }
+
+    tool_context = MockToolContext()
 
     if name == "search_notes":
         query = arguments.get("query")
-
-        # In production, this would call db_tools.search_notes
-        result = {
-            "status": "success",
-            "notes": [
-                {
-                    "title": f"Note related to: {query}",
-                    "content": "Example note content...",
-                    "created_at": "2026-03-29"
-                }
-            ],
-            "count": 1,
-            "source": "MCP Notes Server",
-            "note": "This is MCP-wrapped DB query. Actual implementation would call db_tools.search_notes()"
-        }
-
-        logging.info(f"MCP Notes: search_notes called with query='{query}'")
-
-        return [TextContent(
-            type="text",
-            text=str(result)
-        )]
+        result = db_search_notes(tool_context, query)
+        result["source"] = "MCP Notes Server → PostgreSQL"
+        logging.info(f"🔧 MCP Notes: search_notes '{query}' → {result.get('count', 0)} results")
 
     elif name == "save_note":
         title = arguments.get("title")
         content = arguments.get("content")
-        meeting_id = arguments.get("meeting_id")
-
-        # In production, this would call db_tools.save_note
-        result = {
-            "status": "success",
-            "note_id": "mock-note-id-123",
-            "title": title,
-            "meeting_id": meeting_id,
-            "source": "MCP Notes Server",
-            "note": "This is MCP-wrapped DB operation. Actual implementation would call db_tools.save_note()"
-        }
-
-        logging.info(f"MCP Notes: save_note called: '{title}'")
-
-        return [TextContent(
-            type="text",
-            text=str(result)
-        )]
+        result = db_save_note(tool_context, title, content)
+        result["source"] = "MCP Notes Server → PostgreSQL"
+        logging.info(f"🔧 MCP Notes: save_note '{title}'")
 
     elif name == "search_related_notes":
         query = arguments.get("query")
-
-        # In production, this would call notes_tools.search_related_notes
-        result = {
-            "status": "success",
-            "found": True,
-            "count": 1,
-            "notes": [
-                {
-                    "title": f"Related: {query}",
-                    "relevance": "Contains matching keywords",
-                    "date": "2026-03-29"
-                }
-            ],
-            "source": "MCP Notes Server",
-            "note": "This is MCP-wrapped DB operation. Actual implementation would call notes_tools.search_related_notes()"
-        }
-
-        logging.info(f"MCP Notes: search_related_notes called with query='{query}'")
-
-        return [TextContent(
-            type="text",
-            text=str(result)
-        )]
+        result = search_related_notes(tool_context, query)
+        result["source"] = "MCP Notes Server → PostgreSQL"
+        logging.info(f"🔧 MCP Notes: search_related_notes '{query}'")
 
     elif name == "save_meeting_note":
         title = arguments.get("title")
         content = arguments.get("content")
-
-        # In production, this would call notes_tools.save_meeting_note
-        result = {
-            "status": "success",
-            "note_id": "mock-meeting-note-id-456",
-            "title": title,
-            "message": f"Note saved: '{title}'",
-            "source": "MCP Notes Server",
-            "note": "This is MCP-wrapped DB operation. Actual implementation would call notes_tools.save_meeting_note()"
-        }
-
-        logging.info(f"MCP Notes: save_meeting_note called: '{title}'")
-
-        return [TextContent(
-            type="text",
-            text=str(result)
-        )]
+        result = save_meeting_note(tool_context, title, content)
+        result["source"] = "MCP Notes Server → PostgreSQL"
+        logging.info(f"🔧 MCP Notes: save_meeting_note '{title}'")
 
     else:
         raise ValueError(f"Unknown tool: {name}")
+
+    return [TextContent(type="text", text=str(result))]
 
 
 async def main():

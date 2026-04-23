@@ -1,169 +1,99 @@
 #!/bin/bash
 # ============================================================
-# MeetingMind — Fresh Start (Complete Setup & Deploy)
-# Complete setup from infrastructure to deployment
+# MeetingMind — Fresh Start
+# Wipes all data, re-applies schema, re-deploys.
+# Use this before a competition demo to start clean.
 # ============================================================
 
-set -e  # Exit on error
+set -e
 
 echo "============================================================"
 echo "🚀 MeetingMind Fresh Start"
 echo "============================================================"
 echo ""
 echo "This script will:"
-echo "  1. Clean up ALL existing GCP resources"
-echo "  2. Run GCP infrastructure setup"
-echo "  3. Initialize database schema"
-echo "  4. Deploy to Cloud Run with ADK"
+echo "  1. Drop all data (tasks, meetings, notes, memory, quality_scores)"
+echo "  2. Re-apply the full schema (pgvector + all tables + indexes)"
+echo "  3. Insert fresh seed data"
+echo "  4. Deploy to Cloud Run"
 echo ""
-echo "⏱️  Total time: ~15-20 minutes (mostly Cloud SQL creation)"
-echo ""
-
-# STEP 0: Get PROJECT_ID
-echo "============================================================"
-echo "Step 0: Project Configuration"
-echo "============================================================"
+echo "⏱️  Total time: ~5 minutes"
 echo ""
 
-# Try to get current project
-CURRENT_PROJECT=$(gcloud config get-value project 2>/dev/null || echo "")
+# Load env
+if [ ! -f .env ]; then
+    echo "✗ .env file not found. Copy .env.example to .env and fill in values."
+    exit 1
+fi
+source .env
 
-if [ -n "$CURRENT_PROJECT" ]; then
-    echo "Current gcloud project: $CURRENT_PROJECT"
-    read -p "Use this project? (y/n): " use_current
-    if [ "$use_current" = "y" ] || [ "$use_current" = "Y" ]; then
-        export PROJECT_ID=$CURRENT_PROJECT
-    else
-        read -p "Enter your GCP Project ID: " PROJECT_ID
-        gcloud config set project $PROJECT_ID
-    fi
-else
-    read -p "Enter your GCP Project ID: " PROJECT_ID
-    gcloud config set project $PROJECT_ID
+# ── CONFIRM ───────────────────────────────────────────────
+read -p "⚠️  This will DELETE ALL data. Are you sure? (yes/no): " confirm
+if [ "$confirm" != "yes" ]; then
+    echo "Aborted."
+    exit 0
 fi
 
-echo ""
-echo "✓ Using project: $PROJECT_ID"
-echo ""
-
-# Update .env with PROJECT_ID for cleanup script
-if [ -f .env ]; then
-    sed -i.bak "s/PROJECT_ID=.*/PROJECT_ID=$PROJECT_ID/" .env
-    rm .env.bak
-else
-    echo "PROJECT_ID=$PROJECT_ID" > .env
-fi
-
-# STEP 1: Cleanup existing resources
-echo "============================================================"
-echo "Step 1: Cleanup (if resources exist)"
-echo "============================================================"
-echo ""
-
-bash cleanup_gcp.sh
-
-# STEP 2: Update setup_gcp.sh with PROJECT_ID
+# ── STEP 1: Wipe + Re-apply schema via Cloud SQL ──────────
 echo ""
 echo "============================================================"
-echo "Step 2: Updating setup_gcp.sh with your PROJECT_ID..."
+echo "Step 1: Re-applying database schema..."
 echo "============================================================"
 echo ""
-
-# Create a temporary version with the PROJECT_ID filled in
-sed "s/export PROJECT_ID=\"your-project-id\"/export PROJECT_ID=\"$PROJECT_ID\"/" setup_gcp.sh > /tmp/setup_temp.sh
-chmod +x /tmp/setup_temp.sh
-
-# STEP 3: Run GCP Setup
+echo "Connecting to Cloud SQL instance: meetingmind-db"
+echo "This will drop all data and re-create all tables cleanly."
 echo ""
+
+# Generate a wipe + schema SQL script
+cat > /tmp/fresh_schema.sql << 'SQLEOF'
+-- Wipe all data (respects FK order)
+DROP TABLE IF EXISTS quality_scores CASCADE;
+DROP TABLE IF EXISTS tasks CASCADE;
+DROP TABLE IF EXISTS notes CASCADE;
+DROP TABLE IF EXISTS memory CASCADE;
+DROP TABLE IF EXISTS meetings CASCADE;
+
+-- Re-apply full schema
+SQLEOF
+
+# Append the main schema file
+cat schema.sql >> /tmp/fresh_schema.sql
+
+gcloud sql connect meetingmind-db \
+  --user="$DB_USER" \
+  --database="$DB_NAME" < /tmp/fresh_schema.sql
+
+echo ""
+echo "✓ Database schema applied (pgvector + all tables + seed data)"
+echo ""
+
+# ── STEP 2: Deploy ────────────────────────────────────────
 echo "============================================================"
-echo "Step 3: Running GCP Infrastructure Setup..."
-echo "============================================================"
-echo ""
-echo "⏱️  This takes 10-15 minutes (Cloud SQL creation is slow)"
-echo ""
-
-bash /tmp/setup_temp.sh
-
-# Capture the output variables
-export DB_HOST=$(gcloud sql instances describe meetingmind-db --format="value(ipAddresses[0].ipAddress)")
-export PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format="value(projectNumber)")
-export SERVICE_ACCOUNT="meetingmind-sa@${PROJECT_ID}.iam.gserviceaccount.com"
-
-echo ""
-echo "✓ GCP infrastructure setup complete!"
-echo ""
-
-# STEP 4: Update .env file
-echo "============================================================"
-echo "Step 4: Updating .env file..."
-echo "============================================================"
-echo ""
-
-cat > .env << EOF
-# MeetingMind — Environment Variables
-# Auto-generated by fresh_start.sh
-
-# GCP Project Configuration
-PROJECT_ID=$PROJECT_ID
-PROJECT_NUMBER=$PROJECT_NUMBER
-
-# Service Account Configuration
-SA_NAME=meetingmind-sa
-SERVICE_ACCOUNT=$SERVICE_ACCOUNT
-
-# GCP Region
-REGION=asia-south1
-
-# Gemini Model
-MODEL=gemini-2.5-flash
-
-# Cloud SQL Postgres Configuration
-DB_HOST=$DB_HOST
-DB_NAME=meetingmind
-DB_USER=meetingmind_user
-DB_PASSWORD=MeetingMind@2026!
-DB_PORT=5432
-EOF
-
-echo "✓ .env file updated"
-echo ""
-
-# STEP 5: Initialize Database
-echo "============================================================"
-echo "Step 5: Initialize Database Schema"
-echo "============================================================"
-echo ""
-echo "Running init_db.py to create database schema..."
-echo ""
-
-python init_db.py
-
-echo ""
-echo "✓ Database schema initialized"
-echo ""
-
-# STEP 6: Deploy to Cloud Run
-echo "============================================================"
-echo "Step 6: Deploying to Cloud Run..."
+echo "Step 2: Deploying to Cloud Run..."
 echo "============================================================"
 echo ""
 
 bash deploy.sh
 
+# ── DONE ──────────────────────────────────────────────────
+SERVICE_URL=$(gcloud run services describe meetingmind \
+  --project="$PROJECT_ID" \
+  --region="$REGION" \
+  --platform=managed \
+  --format="value(status.url)" 2>/dev/null || echo "check gcloud run services list")
+
 echo ""
 echo "============================================================"
-echo "🎉 SETUP & DEPLOYMENT COMPLETE!"
+echo "🎉 FRESH START COMPLETE!"
 echo "============================================================"
 echo ""
-echo "Your MeetingMind is now deployed!"
+echo "  🌐 Service URL: $SERVICE_URL"
 echo ""
-echo "Service URL (use this one):"
-SERVICE_URL=$(gcloud run services describe meetingmind --project=$PROJECT_ID --region=asia-south1 --platform=managed --format="value(status.url)")
-echo "  $SERVICE_URL"
-echo ""
-echo "Test the API:"
-echo "  curl -X POST $SERVICE_URL/run \\"
-echo "    -H 'Content-Type: application/json' \\"
-echo "    -d '{\"appName\":\"meetingmind\",\"userId\":\"test\",\"sessionId\":\"s1\",\"newMessage\":{\"role\":\"user\",\"parts\":[{\"text\":\"What tasks are pending?\"}]}}'"
-echo ""
+echo "Demo quick-test sequence:"
+echo "  1. Open $SERVICE_URL"
+echo "  2. Paste Q3 Product Planning transcript from SAMPLE_TRANSCRIPT.md"
+echo "  3. Ask: 'What tasks are pending?'"
+echo "  4. Ask: 'Who has the most tasks?'"
+echo "  5. Ask: 'What topics keep coming up?'"
+echo "  6. Ask: 'What's overdue?'"
 echo "============================================================"

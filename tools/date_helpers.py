@@ -15,17 +15,16 @@ def parse_relative_date(tool_context: ToolContext, date_string: str, reference_d
     Args:
         tool_context: ADK tool context.
         date_string: Relative date like "Monday", "tomorrow", "next week", "April 10th"
-        reference_date: Optional reference date in YYYY-MM-DD format. Defaults to today (2026-04-05).
+        reference_date: Optional reference date in YYYY-MM-DD format. Defaults to today.
 
     Returns:
         dict with absolute date in YYYY-MM-DD format.
     """
     try:
-        # Set reference date (default to today: April 5, 2026 - Sunday)
         if reference_date:
             ref = datetime.strptime(reference_date, "%Y-%m-%d")
         else:
-            ref = datetime(2026, 4, 5)  # Sunday, April 5, 2026
+            ref = datetime.now()
 
         date_lower = date_string.lower().strip()
 

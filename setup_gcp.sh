@@ -1,17 +1,17 @@
 #!/bin/bash
 # ============================================================
-# MeetingMind — Day 1: Full GCP Setup
+# MeetingMind — GCP Setup
 # Run this line by line in Cloud Shell
 # ============================================================
 
 # STEP 1: Set your project
 export PROJECT_ID="genai-hackathon-2026-491904"
-export REGION="us-central1"
+export REGION="us-central1"          # ← verify this matches your .env
 export SA_NAME="meetingmind-sa"
 export DB_INSTANCE="meetingmind-db"
 export DB_NAME="meetingmind"
 export DB_USER="meetingmind_user"
-export DB_PASSWORD="temp-pwd"    # ← CHANGE THIS
+export DB_PASSWORD="temp-pwd"        # ← CHANGE THIS to a strong password
 
 gcloud config set project $PROJECT_ID
 echo "Project set to: $PROJECT_ID"
@@ -26,9 +26,12 @@ gcloud services enable \
   sqladmin.googleapis.com \
   sql-component.googleapis.com \
   cloudresourcemanager.googleapis.com \
-  logging.googleapis.com
+  logging.googleapis.com \
+  gmail.googleapis.com \
+  docs.googleapis.com \
+  drive.googleapis.com
 
-echo "✓ APIs enabled"
+echo "✓ APIs enabled (core + Google Workspace)"
 
 # STEP 3: Create Cloud SQL Postgres instance
 # NOTE: This takes 5-10 minutes
@@ -74,7 +77,7 @@ export SERVICE_ACCOUNT="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 echo "✓ Service account: $SERVICE_ACCOUNT"
 
 # STEP 9: Grant all required IAM roles
-# Vertex AI (for Gemini)
+# Vertex AI (Gemini + Text Embeddings)
 gcloud projects add-iam-policy-binding $PROJECT_ID \
   --member="serviceAccount:$SERVICE_ACCOUNT" \
   --role="roles/aiplatform.user"
@@ -88,6 +91,19 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
 gcloud projects add-iam-policy-binding $PROJECT_ID \
   --member="serviceAccount:$SERVICE_ACCOUNT" \
   --role="roles/logging.logWriter"
+
+# Artifact Registry (for Cloud Build pushing Docker images)
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:$SERVICE_ACCOUNT" \
+  --role="roles/artifactregistry.writer"
+
+# Google Workspace (Gmail send, Docs create, Drive read)
+# NOTE: Domain-Wide Delegation must be configured separately in Google Workspace Admin
+# for service accounts to act on behalf of users. For the hackathon demo, the service
+# account can only access resources it owns (e.g. its own Drive).
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:$SERVICE_ACCOUNT" \
+  --role="roles/iam.serviceAccountTokenCreator"
 
 echo "✓ IAM roles granted"
 
@@ -117,5 +133,11 @@ echo "NEXT STEPS:"
 echo "1. Copy these values to your .env file"
 echo "2. Connect to Cloud SQL and run schema.sql:"
 echo "   gcloud sql connect $DB_INSTANCE --user=$DB_USER --database=$DB_NAME"
-echo "3. Run deploy.sh"
+echo "   Then paste the full contents of schema.sql (includes pgvector + all tables)"
+echo "3. Deploy the application:"
+echo "   bash deploy.sh"
+echo "============================================================"
+echo ""
+echo "NOTE: pgvector is pre-installed in Cloud SQL Postgres 15+"
+echo "      The schema.sql already includes: CREATE EXTENSION IF NOT EXISTS vector;"
 echo "============================================================"

@@ -1,6 +1,6 @@
 -- ============================================================
--- MeetingMind — Database Schema
--- Multi-Agent Productivity Assistant with MCP Integration
+-- MeetingMind — Database Schema v2
+-- Multi-Agent Productivity Assistant with MCP + RAG Integration
 -- Run this in Cloud Shell after Day 1 GCP setup
 -- ============================================================
 
@@ -8,17 +8,20 @@
 -- gcloud sql connect meetingmind-db --user=meetingmind_user --database=meetingmind
 -- Then paste everything below
 
--- NOTE: This schema supports the MCP-wrapped database operations.
--- MCP servers (calendar, tasks, notes) use these tables via db_tools.py
+-- EXTENSIONS ───────────────────────────────────────────────
 
--- CREATE TABLES 
+-- pgvector: enables 768-dim semantic embeddings (Vertex AI gecko@003)
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- CREATE TABLES ────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS meetings (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     transcript  TEXT,
     summary     TEXT,
     session_id  VARCHAR(255),
-    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    embedding   vector(768)   -- Vertex AI embedding of summary
 );
 
 CREATE TABLE IF NOT EXISTS tasks (
@@ -29,7 +32,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     deadline    VARCHAR(255) DEFAULT 'Not specified',
     priority    VARCHAR(50)  DEFAULT 'Medium',
     status      VARCHAR(50)  DEFAULT 'Pending',
-    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    embedding   vector(768)   -- Vertex AI embedding of task_name
 );
 
 CREATE TABLE IF NOT EXISTS notes (
@@ -37,7 +41,8 @@ CREATE TABLE IF NOT EXISTS notes (
     title       VARCHAR(500),
     content     TEXT,
     meeting_id  UUID REFERENCES meetings(id) ON DELETE SET NULL,
-    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    embedding   vector(768)   -- Vertex AI embedding of title + content
 );
 
 CREATE TABLE IF NOT EXISTS memory (
@@ -46,17 +51,48 @@ CREATE TABLE IF NOT EXISTS memory (
     key         VARCHAR(255),
     value       TEXT,
     created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    embedding   vector(768),  -- Vertex AI embedding of key + value
     UNIQUE(session_id, key)
 );
 
--- INDEXES ──────────────────────────────────────────────────
+-- Stores LLM-as-Judge quality scores per meeting processing run
+CREATE TABLE IF NOT EXISTS quality_scores (
+    id                             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    meeting_id                     UUID REFERENCES meetings(id) ON DELETE CASCADE,
+    summary_quality                INT,
+    task_extraction_completeness   INT,
+    priority_accuracy              INT,
+    owner_attribution              INT,
+    overall_score                  FLOAT,
+    flags                          JSONB DEFAULT '[]',
+    recommendations                JSONB DEFAULT '[]',
+    created_at                     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 
-CREATE INDEX IF NOT EXISTS idx_tasks_status   ON tasks(status);
-CREATE INDEX IF NOT EXISTS idx_tasks_owner    ON tasks(LOWER(owner));
-CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority);
-CREATE INDEX IF NOT EXISTS idx_notes_title    ON notes(LOWER(title));
-CREATE INDEX IF NOT EXISTS idx_memory_session ON memory(session_id);
+-- STANDARD INDEXES ─────────────────────────────────────────
+
+CREATE INDEX IF NOT EXISTS idx_tasks_status     ON tasks(status);
+CREATE INDEX IF NOT EXISTS idx_tasks_owner      ON tasks(LOWER(owner));
+CREATE INDEX IF NOT EXISTS idx_tasks_priority   ON tasks(priority);
+CREATE INDEX IF NOT EXISTS idx_notes_title      ON notes(LOWER(title));
+CREATE INDEX IF NOT EXISTS idx_memory_session   ON memory(session_id);
 CREATE INDEX IF NOT EXISTS idx_meetings_session ON meetings(session_id);
+CREATE INDEX IF NOT EXISTS idx_quality_meeting  ON quality_scores(meeting_id);
+
+-- VECTOR INDEXES (IVFFlat — approximate nearest neighbour) ──
+-- lists = ~sqrt(expected row count); tune up as data grows
+
+CREATE INDEX IF NOT EXISTS idx_tasks_embedding
+    ON tasks USING ivfflat (embedding vector_cosine_ops) WITH (lists = 50);
+
+CREATE INDEX IF NOT EXISTS idx_notes_embedding
+    ON notes USING ivfflat (embedding vector_cosine_ops) WITH (lists = 20);
+
+CREATE INDEX IF NOT EXISTS idx_meetings_embedding
+    ON meetings USING ivfflat (embedding vector_cosine_ops) WITH (lists = 20);
+
+CREATE INDEX IF NOT EXISTS idx_memory_embedding
+    ON memory USING ivfflat (embedding vector_cosine_ops) WITH (lists = 10);
 
 -- SEED DATA (for demo — makes DuplicateCheck & NotesAgent useful) ──
 
