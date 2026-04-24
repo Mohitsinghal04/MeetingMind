@@ -21,3 +21,5 @@ uvicorn[standard]>=0.30.0
 python-multipart>=0.0.9
 # pgvector Python adapter
 pgvector>=0.3.0
+# GCS for meeting doc storage (service accounts have no personal Drive quota)
+google-cloud-storage>=2.14.0

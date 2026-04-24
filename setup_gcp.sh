@@ -27,6 +27,7 @@ gcloud services enable \
   sql-component.googleapis.com \
   cloudresourcemanager.googleapis.com \
   logging.googleapis.com \
+  storage.googleapis.com \
   gmail.googleapis.com \
   docs.googleapis.com \
   drive.googleapis.com
@@ -97,10 +98,12 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
   --member="serviceAccount:$SERVICE_ACCOUNT" \
   --role="roles/artifactregistry.writer"
 
-# Google Workspace (Gmail send, Docs create, Drive read)
-# NOTE: Domain-Wide Delegation must be configured separately in Google Workspace Admin
-# for service accounts to act on behalf of users. For the hackathon demo, the service
-# account can only access resources it owns (e.g. its own Drive).
+# Google Cloud Storage (meeting docs stored as public HTML — avoids Drive quota issues)
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:$SERVICE_ACCOUNT" \
+  --role="roles/storage.admin"
+
+# Google Workspace (Gmail send, Drive read/search)
 gcloud projects add-iam-policy-binding $PROJECT_ID \
   --member="serviceAccount:$SERVICE_ACCOUNT" \
   --role="roles/iam.serviceAccountTokenCreator"

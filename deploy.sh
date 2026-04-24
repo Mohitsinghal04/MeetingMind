@@ -92,7 +92,9 @@ REGION=${REGION},\
 GOOGLE_GENAI_USE_VERTEXAI=TRUE,\
 CALENDAR_ID=${CALENDAR_ID:-primary},\
 TIMEZONE=${TIMEZONE:-Asia/Kolkata},\
-GOOGLE_WORKSPACE_ENABLED=${GOOGLE_WORKSPACE_ENABLED:-false}"
+GOOGLE_WORKSPACE_ENABLED=${GOOGLE_WORKSPACE_ENABLED:-false},\
+GDRIVE_FOLDER_ID=${GDRIVE_FOLDER_ID:-},\
+GDRIVE_OWNER_EMAIL=${GDRIVE_OWNER_EMAIL:-}"
 
 if [ "$USE_ADK_DEPLOY" = true ]; then
     # Legacy: ADK deploy (no custom UI, no FastAPI)
@@ -164,14 +166,13 @@ echo ""
 echo "============================================================"
 echo "COMPETITION CHECKLIST:"
 echo "============================================================"
-echo "✓ 10 agents (2 parallel stages — ParallelAgent)"
+echo "✓ 8 agents: root, analysis, save+schedule, notes, briefing, query, execution, memory"
 echo "✓ 4 MCP servers: Tasks, Calendar, Notes, Google Workspace"
-echo "✓ RAG: Vertex AI textembedding-gecko@003 + pgvector semantic search"
-echo "✓ LLM-as-Judge evaluation agent (quality scoring)"
-echo "✓ React dashboard (Chat + Pipeline Viz + Task Board + Analytics)"
+echo "✓ RAG: Vertex AI text-embedding-004 + pgvector semantic search"
+echo "✓ React dashboard (Chat + Task Board + Meetings + Analytics)"
 echo "✓ PostgreSQL + pgvector (Cloud SQL)"
-echo "✓ Cloud Run + Vertex AI deployment"
-echo "✓ 7 intent pipelines"
+echo "✓ Google Docs auto-created per meeting"
+echo "✓ Cloud Run + Vertex AI deployment (single URL)"
 echo "============================================================"
 echo ""
 echo "Quick smoke tests:"

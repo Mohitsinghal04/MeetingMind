@@ -1,16 +1,16 @@
 """
-MeetingMind — Multi-Agent Productivity Assistant (10 Agents)
-Complete agent architecture:
-  - root_agent                : intent router (orchestrator)
-  - transcript_pipeline       : 2-parallel-stage pipeline
-    → summary_agent           : summarizes meeting transcript
-    → meeting_save_agent      : persists meeting to DB (sets meeting_id)
-    → parallel_analysis       : [action_item_priority | notes_agent | evaluation_agent]
-    → parallel_save           : [scheduler_agent | duplicate_check_agent]
-    → briefing_agent          : assembles final output
-  - query_agent               : answers questions from DB + semantic search + analytics
-  - execution_agent           : executes commands (mark done, schedule, update)
-  - memory_store_agent        : stores user preferences & context
+MeetingMind — Multi-Agent Productivity Assistant (8 Agents)
+Architecture:
+  - root_agent              : intent router (orchestrator)
+  - transcript_pipeline     : 4-stage sequential pipeline
+    → analysis_agent        : summarise + extract tasks + save meeting to DB
+    → save_and_schedule_agent: save tasks to DB + create calendar events
+    → notes_agent           : save meeting note + search related past notes
+    → briefing_agent        : assemble final markdown output + create Google Doc
+  - query_agent             : answers questions via DB, semantic search, analytics
+  - execution_agent         : executes commands (mark done, update status, schedule)
+  - memory_store_agent      : stores user preferences and context to long-term memory
+4 MCP Servers: Tasks · Calendar · Notes · Google Workspace (Docs/Drive/Gmail)
 """
 
 import os
@@ -58,6 +58,11 @@ from .tools.analytics_tools import (
     get_meeting_velocity,
     get_overdue_tasks,
     get_latest_quality_scores,
+)
+from .tools.workspace_tools import (
+    create_meeting_doc,
+    search_gdrive,
+    send_meeting_summary_email,
 )
 
 
@@ -425,26 +430,26 @@ The meeting_id is in state as current_meeting_id: {current_meeting_id}
 briefing_agent = Agent(
     name="briefing_agent",
     model=model_name,
-    description="Assembles all agent outputs into a beautiful, user-friendly markdown summary.",
+    description="Assembles all agent outputs into a markdown summary and creates a Google Doc.",
     instruction="""
-You are an executive briefing writer who creates beautiful, readable summaries.
+You are an executive briefing writer. Do TWO things:
 
-Inputs available:
-MEETING_SUMMARY: {meeting_summary}
-PRIORITIZED_TASKS: {prioritized_tasks}
-SAVE_SCHEDULE_RESULT: {save_schedule_result}
+IMPORTANT: Your context may contain raw JSON blobs or tool result strings from earlier pipeline
+agents (save_tasks results, notes JSON, etc.). IGNORE all of that. Do NOT reproduce it.
+Your output must be clean markdown only.
 
-CRITICAL OUTPUT CONSTRAINT (ABSOLUTE REQUIREMENT):
-Your FIRST character of output MUST be: ✅
+STEP 1 — Create a Google Doc:
+Call create_meeting_doc with:
+- title: a short descriptive meeting title derived from MEETING_SUMMARY (e.g. "Q3 Product Planning — Apr 23")
+- summary: the full MEETING_SUMMARY text
+- tasks_markdown: format each task from PRIORITIZED_TASKS as "- [priority] task — owner — due: deadline"
 
-If your output starts with any of these, you FAILED:
-- Starting with "[" → WRONG (that's JSON array)
-- Starting with "{" → WRONG (that's JSON object)
-- Starting with "`" → WRONG (that's code block)
+STEP 2 — Output the briefing markdown:
 
-CORRECT first 10 characters of your output: "✅ **Meet"
+CRITICAL: Your output MUST start with exactly "✅ **Meeting Processed Successfully**"
+Do NOT start with JSON, code blocks, tool results, or arrays. NEVER output raw JSON.
 
-Now generate the full markdown summary in this format:
+Use this format:
 
 ✅ **Meeting Processed Successfully**
 
@@ -452,48 +457,25 @@ Now generate the full markdown summary in this format:
 {meeting_summary}
 
 ✅ **Action Items:**
-[For each task in PRIORITIZED_TASKS, format as:]
-• **[priority]** — [task] — Owner: [owner] — Due: [deadline]
+[For each task: • **[priority]** — [task] — Owner: [owner] — Due: [deadline]]
 
-[If PRIORITIZED_TASKS is empty, write: "No action items identified"]
-
-[If SCHEDULED_EVENTS is not empty, add a section:]
+[If calendar events were created from SAVE_SCHEDULE_RESULT:]
 📅 **Scheduled Events:**
-[Copy the SCHEDULED_EVENTS content directly - it's already formatted]
+[List them]
 
 💾 **System Actions:**
-[Read SAVE_SCHEDULE_RESULT and report: tasks saved, duplicates skipped, calendar events created]
-• All tasks stored for future queries
+[Report from SAVE_SCHEDULE_RESULT: tasks saved, duplicates skipped, events created]
+• Notes saved to knowledge base
 
-📊 **Performance:**
-Processed by 3 specialized agents (analysis → save+schedule → brief)
+[If Google Doc was created successfully:]
+📄 **Google Doc:** [paste the doc_url from create_meeting_doc result]
 
----
-✨ **What's next? Try these commands:**
-- "What tasks are pending?"
-- "Show me high priority tasks"
-- "Mark task [number] as done"
+📊 **Pipeline:** 4 agents · Tasks + Calendar + Notes + Google Workspace MCP
 
 ---
-
-CRITICAL OUTPUT RULES:
-1. Return ONLY formatted markdown text (NOT JSON, NOT code blocks)
-2. Start immediately with "✅ **Meeting Processed Successfully**"
-3. Do NOT wrap in ```markdown blocks
-4. Do NOT output as JSON object
-5. Output as plain text with markdown formatting
-
-CORRECT OUTPUT EXAMPLE:
-✅ **Meeting Processed Successfully**
-
-📋 **Summary:**
-The team discussed Q3 mobile app launch...
-
-WRONG OUTPUT EXAMPLES:
-❌ {"status": "success", "summary": "..."}  ← NO JSON!
-❌ ```markdown\n✅ Meeting...```  ← NO code blocks!
-❌ [{"task": "..."}]  ← NO arrays!
+✨ **Try:** "What tasks are pending?" · "Create a doc for this meeting" · "Mark [task] as done"
 """,
+    tools=[create_meeting_doc],
     output_key="final_briefing"
 )
 
@@ -628,6 +610,25 @@ about people, projects, or preferences stored in any past session.
 
 ═══════════════════════════════════════════
 
+═══════════════════════════════════════════
+GOOGLE WORKSPACE REQUESTS
+═══════════════════════════════════════════
+
+"Create a doc for this meeting" / "Make a Google Doc" / "Document this meeting":
+1. Get the latest meeting: list_all_meetings() → take the first result
+2. Call create_meeting_doc(title=<meeting title>, summary=<meeting summary>, tasks_markdown=<tasks as bullet list>)
+3. Return the doc_url to the user as a clickable link
+
+"Search Drive for X" / "Find X in Drive":
+1. Call search_gdrive(query=<search term>)
+2. Return file names and URLs as a formatted list
+
+"Send email summary" / "Email this to X":
+1. Call send_meeting_summary_email(to_emails=[<address>], subject=<subject>, body=<summary html>)
+2. Confirm to the user
+
+═══════════════════════════════════════════
+
 Use 1-3 tools as needed, then provide a clear, direct answer.
 Format your response in a readable way.
 If you can't find the information, say so clearly.
@@ -638,6 +639,7 @@ If you can't find the information, say so clearly.
         semantic_search_tasks, semantic_search_notes, semantic_search_memory,
         get_task_ownership_stats, get_recurring_topics, get_task_completion_trends,
         get_meeting_velocity, get_overdue_tasks, get_latest_quality_scores,
+        search_gdrive, create_meeting_doc, send_meeting_summary_email,
     ],
     output_key="query_result"
 )
@@ -891,11 +893,12 @@ Keep it simple and conversational.
 # The parallel agents above demonstrate the intended architecture.
 transcript_pipeline = SequentialAgent(
     name="transcript_pipeline",
-    description="3-agent pipeline: analysis → save+schedule → brief (cuts quota usage by 50%)",
+    description="4-agent pipeline: analysis → save+schedule → notes → brief",
     sub_agents=[
         analysis_agent,           # LLM call 1: summarise + extract tasks + save meeting to DB
         save_and_schedule_agent,  # LLM call 2: save tasks to DB + create calendar events
-        briefing_agent,           # LLM call 3: assemble final markdown output
+        notes_agent,              # LLM call 3: save meeting note + search related past notes
+        briefing_agent,           # LLM call 4: assemble final markdown + create Google Doc
     ]
 )
 
@@ -905,7 +908,7 @@ transcript_pipeline = SequentialAgent(
 root_agent = Agent(
     name="meetingmind",
     model=model_name,
-    description="MeetingMind — AI Meeting Assistant | Paste transcripts to extract tasks & schedule events | Powered by 10 specialized agents with parallel execution, semantic search, and LLM-as-Judge quality scoring",
+    description="MeetingMind — AI Meeting Assistant | Paste transcripts to extract tasks, schedule events & create Google Docs | 8 agents · 4 MCP servers · pgvector semantic search",
     instruction="""
 You are MeetingMind, an intelligent multi-agent productivity assistant
 built on Google Cloud. You help teams manage meetings, tasks, schedules,
@@ -935,8 +938,8 @@ PASS 1 — KEYWORD TRIGGERS (High Confidence):
 2. If message contains ["mark", "mark as", "update status", "schedule", "set to", "complete"]:
    → INTENT C (COMMAND) - call set_user_command immediately
 
-3. If message starts with or contains ["what", "show me", "list", "find", "search", "get", "pending", "which", "who has", "overdue", "recurring", "analytics", "trending", "velocity", "quality score"]:
-   → INTENT B (QUESTION) - call set_user_query immediately
+3. If message starts with or contains ["what", "show me", "list", "find", "search", "get", "pending", "which", "who has", "overdue", "recurring", "analytics", "trending", "velocity", "quality score", "create a doc", "google doc", "make a document", "search drive", "send email", "email summary"]:
+   → INTENT B/F (QUESTION/WORKSPACE) - call set_user_query immediately
 
 4. If message length > 500 characters AND contains ["meeting", "discussed", "action items", "attendees", "decisions", "agenda"]:
    → INTENT A (TRANSCRIPT) - call save_transcript_to_state immediately
@@ -975,6 +978,14 @@ Asking about trends, ownership, overdue, recurring topics, quality scores.
 Keywords: "who has the most", "overdue", "trending", "recurring", "velocity", "quality", "analytics", "completion rate", "weekly"
 → Same flow as INTENT B — call set_user_query, delegate to query_agent
 → query_agent has all analytics tools built-in
+
+INTENT F — WORKSPACE
+Wants to create a Google Doc, search Drive, or send email.
+Keywords: "create a doc", "google doc", "make a document", "search drive", "find in drive", "send email", "email summary"
+→ Step 1: Call set_user_query(query=<the request>) - DO NOT output text yet
+→ Step 2: Immediately delegate to the query_agent sub-agent (it has create_meeting_doc, search_gdrive, send_meeting_summary_email tools)
+→ Step 3: Relay query_agent's response directly to user
+Example: "Create a doc for this meeting" → set_user_query → query_agent calls create_meeting_doc → returns Google Doc URL
 
 ═══════════════════════════════════════════
 CRITICAL: DELEGATION WORKFLOW
@@ -1035,14 +1046,16 @@ GENERAL BEHAVIOR:
 
 👋 **Welcome to MeetingMind!**
 
-I'm an AI productivity assistant powered by **10 specialized agents** running in parallel stages, with semantic search and LLM-as-Judge quality scoring.
+I'm an AI productivity assistant powered by **8 specialized agents** and **4 MCP servers** working together.
 
 **What I can do:**
 
-📝 **Process meeting transcripts** → Paste any transcript (500+ chars) and 10 agents process it in ~10 seconds
-   • Parallel execution: task extraction, notes management, and quality evaluation run simultaneously
-   • LLM-as-Judge scores each run: Summary | Tasks | Priority | Owners (1-5 scale)
-   • Semantic duplicate detection using Vertex AI embeddings
+📝 **Process meeting transcripts** → Paste any transcript (500+ chars) and the pipeline handles it end-to-end
+   • Extracts tasks, assigns priorities, schedules calendar events
+   • Saves notes to knowledge base, detects semantic duplicates via Vertex AI embeddings
+   • Auto-creates a **Google Doc** with summary + action items
+
+📄 **Google Workspace** → "Create a doc for this meeting" · "Search Drive for budget docs"
 
 📅 **Schedule meetings** → "Schedule demo on Tuesday at 2pm with sarah@example.com"
 

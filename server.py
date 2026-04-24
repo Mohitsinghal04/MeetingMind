@@ -20,10 +20,11 @@ from typing import Optional
 from dotenv import load_dotenv
 load_dotenv()
 
+import json
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 # When running inside the container, this file is at
@@ -90,7 +91,7 @@ async def lifespan(app: FastAPI):
         app_name="meetingmind",
         session_service=_session_service,
     )
-    logger.info("MeetingMind server ready (7 agents, FastAPI)")
+    logger.info("MeetingMind server ready (8 agents, 4 MCP servers, FastAPI)")
     yield
 
 
@@ -115,7 +116,34 @@ class ChatRequest(BaseModel):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "meetingmind", "agents": 7}
+    return {"status": "ok", "service": "meetingmind", "agents": 8, "mcp_servers": 4}
+
+
+import re as _re
+
+def _clean_response(text: str) -> str:
+    """Strip tool-result JSON and intermediate agent chatter that leaks before the briefing."""
+    if not text:
+        return "⚠️ No response from agents."
+    # If the briefing marker exists, drop everything before it
+    for marker in ("✅ **Meeting Processed", "📋 **Summary", "✅ **"):
+        idx = text.find(marker)
+        if idx > 0:
+            return text[idx:]
+    # Strip leading ```json ... ``` blocks
+    text = _re.sub(r"^```[\w]*\n.*?```\s*", "", text, flags=_re.DOTALL)
+    # Strip leading lines that look like raw JSON / tool results
+    lines = text.splitlines()
+    clean = []
+    skip = True
+    for line in lines:
+        stripped = line.strip()
+        if skip and (stripped.startswith("{") or stripped.startswith("[")
+                     or stripped.startswith('"') or stripped.startswith("```")):
+            continue
+        skip = False
+        clean.append(line)
+    return "\n".join(clean).strip() or text.strip()
 
 
 @app.post("/api/chat")
@@ -123,7 +151,6 @@ async def chat(req: ChatRequest):
     session_id = req.session_id or str(uuid.uuid4())
     user_id = "web_user"
 
-    # Create session — ADK 1.x uses async create_session
     try:
         coro = _session_service.create_session(
             app_name="meetingmind",
@@ -136,23 +163,50 @@ async def chat(req: ChatRequest):
         pass
 
     content = Content(role="user", parts=[Part(text=req.message)])
-    response_text = ""
 
-    try:
-        async for event in _runner.run_async(
-            user_id=user_id,
-            session_id=session_id,
-            new_message=content,
-        ):
-            if event.is_final_response() and event.content:
-                for part in event.content.parts or []:
-                    if hasattr(part, "text") and part.text:
-                        response_text += part.text
-    except Exception as e:
-        logger.error(f"Agent error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    async def event_stream():
+        response_text = ""
+        # Run agent in background task so we can heartbeat concurrently
+        result_holder: list = []
+        error_holder:  list = []
 
-    return {"response": response_text, "session_id": session_id}
+        async def run_agent():
+            try:
+                async for event in _runner.run_async(
+                    user_id=user_id,
+                    session_id=session_id,
+                    new_message=content,
+                ):
+                    if event.is_final_response() and event.content:
+                        for part in event.content.parts or []:
+                            if hasattr(part, "text") and part.text:
+                                response_text_ref[0] += part.text
+            except Exception as exc:
+                error_holder.append(str(exc))
+
+        response_text_ref = [""]
+        agent_task = asyncio.create_task(run_agent())
+
+        # Heartbeat every 3 s to keep connection alive (prevents Safari/proxy timeout)
+        while not agent_task.done():
+            yield ": heartbeat\n\n"
+            await asyncio.sleep(3)
+
+        await agent_task
+
+        if error_holder:
+            logger.error(f"Agent error: {error_holder[0]}")
+            payload = {"type": "error", "detail": error_holder[0]}
+        else:
+            payload = {
+                "type":       "response",
+                "response":   _clean_response(response_text_ref[0]),
+                "session_id": session_id,
+            }
+
+        yield f"data: {json.dumps(payload)}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @app.get("/api/tasks")

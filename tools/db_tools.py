@@ -17,7 +17,7 @@ import psycopg2.extras
 from psycopg2.pool import ThreadedConnectionPool
 from google.adk.tools.tool_context import ToolContext
 from .metrics import timed_operation
-from .embeddings import get_embedding
+from .embeddings import get_embedding, get_embeddings_batch
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 try:
@@ -151,6 +151,11 @@ def save_tasks(tool_context: ToolContext, tasks_json: str, skip_duplicate_check:
         if not isinstance(tasks, list):
             tasks = [tasks]
 
+        # Batch-embed all task names in a single API call (N tasks = 1 request, not N)
+        task_names = [t.get("task", t.get("task_name", "Unnamed task")) for t in tasks]
+        embeddings_batch = get_embeddings_batch(task_names)
+        task_embeddings = dict(zip(task_names, embeddings_batch))
+
         with get_db_connection() as conn:
             cur = conn.cursor()
             meeting_id = tool_context.state.get("current_meeting_id")
@@ -159,10 +164,11 @@ def save_tasks(tool_context: ToolContext, tasks_json: str, skip_duplicate_check:
 
             for task in tasks:
                 task_name = task.get("task", task.get("task_name", "Unnamed task"))
+                embedding = task_embeddings.get(task_name)
 
                 # Check for duplicates unless explicitly skipped
                 if not skip_duplicate_check:
-                    duplicate_check = check_duplicate_tasks(tool_context, task_name)
+                    duplicate_check = check_duplicate_tasks(tool_context, task_name, precomputed_embedding=embedding)
                     if duplicate_check.get("is_duplicate"):
                         existing = duplicate_check.get("existing_task", {})
                         skipped_duplicates.append({
@@ -172,9 +178,8 @@ def save_tasks(tool_context: ToolContext, tasks_json: str, skip_duplicate_check:
                         logging.info(f"⏭️  Skipped duplicate: {task_name}")
                         continue  # Skip saving this task
 
-                # No duplicate found - save the task
+                # No duplicate found - save the task (embedding already computed above)
                 task_id = str(uuid.uuid4())
-                embedding = get_embedding(task_name)
                 cur.execute(
                     """INSERT INTO tasks
                        (id, meeting_id, task_name, owner, deadline, priority, status, created_at, embedding)
@@ -218,7 +223,11 @@ def save_tasks(tool_context: ToolContext, tasks_json: str, skip_duplicate_check:
 
 
 @timed_operation("check_duplicate_tasks")
-def check_duplicate_tasks(tool_context: ToolContext, task_name: str) -> dict:
+def check_duplicate_tasks(
+    tool_context: ToolContext,
+    task_name: str,
+    precomputed_embedding: Optional[list] = None,
+) -> dict:
     """Check if a similar task already exists using semantic similarity (with LIKE fallback).
 
     Tries cosine similarity via pgvector first (threshold 0.85). Falls back to
@@ -227,6 +236,7 @@ def check_duplicate_tasks(tool_context: ToolContext, task_name: str) -> dict:
     Args:
         tool_context: ADK tool context.
         task_name: The task name to check for duplicates.
+        precomputed_embedding: Optional pre-computed embedding to avoid a redundant API call.
 
     Returns:
         dict with is_duplicate flag, similarity score, and existing task details if found.
@@ -234,7 +244,7 @@ def check_duplicate_tasks(tool_context: ToolContext, task_name: str) -> dict:
     try:
         # --- Semantic check (preferred) ---
         if _PGVECTOR_AVAILABLE:
-            embedding = get_embedding(task_name)
+            embedding = precomputed_embedding if precomputed_embedding is not None else get_embedding(task_name)
             if embedding is not None:
                 with get_db_connection() as conn:
                     cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)

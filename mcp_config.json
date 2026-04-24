@@ -14,7 +14,12 @@
       "command": "python",
       "args": ["-m", "tools.notes_mcp_server"],
       "description": "MCP server for notes management (search and save meeting notes)"
+    },
+    "workspace": {
+      "command": "python",
+      "args": ["-m", "tools.workspace_mcp_server"],
+      "description": "MCP server for Google Workspace (create Docs, search Drive, send Gmail)"
     }
   },
-  "competition_note": "This configuration demonstrates MCP integration for APAC Google competition. All 3 MCP servers wrap existing database operations to satisfy the 'Integrate multiple tools via MCP' requirement while maintaining system stability."
+  "competition_note": "4 MCP servers: Tasks, Calendar, Notes, and Google Workspace. All servers wrap real operations — Tasks/Calendar/Notes target PostgreSQL, Workspace targets Google APIs (Docs, Drive, Gmail) via ADC."
 }
