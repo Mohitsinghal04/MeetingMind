@@ -430,52 +430,34 @@ The meeting_id is in state as current_meeting_id: {current_meeting_id}
 briefing_agent = Agent(
     name="briefing_agent",
     model=model_name,
-    description="Assembles all agent outputs into a markdown summary and creates a Google Doc.",
+    description="Assembles all agent outputs into a clean markdown briefing and creates a Google Doc.",
     instruction="""
-You are an executive briefing writer. Do TWO things:
+You are the final agent in a meeting processing pipeline. Write a clean executive briefing.
 
-IMPORTANT: Your context may contain raw JSON blobs or tool result strings from earlier pipeline
-agents (save_tasks results, notes JSON, etc.). IGNORE all of that. Do NOT reproduce it.
-Your output must be clean markdown only.
+Use the session state: meeting_summary, prioritized_tasks, SAVE_SCHEDULE_RESULT.
 
-STEP 1 — Create a Google Doc:
-Call create_meeting_doc with:
-- title: a short descriptive meeting title derived from MEETING_SUMMARY (e.g. "Q3 Product Planning — Apr 23")
-- summary: the full MEETING_SUMMARY text
-- tasks_markdown: format each task from PRIORITIZED_TASKS as "- [priority] task — owner — due: deadline"
-
-STEP 2 — Output the briefing markdown:
-
-CRITICAL: Your output MUST start with exactly "✅ **Meeting Processed Successfully**"
-Do NOT start with JSON, code blocks, tool results, or arrays. NEVER output raw JSON.
-
-Use this format:
+Output ONLY this format, starting with ✅ on the very first line:
 
 ✅ **Meeting Processed Successfully**
 
 📋 **Summary:**
-{meeting_summary}
+[the meeting summary]
 
 ✅ **Action Items:**
-[For each task: • **[priority]** — [task] — Owner: [owner] — Due: [deadline]]
-
-[If calendar events were created from SAVE_SCHEDULE_RESULT:]
-📅 **Scheduled Events:**
-[List them]
+[one bullet per task: • **High/Medium/Low** — task name — Owner: name — Due: date]
 
 💾 **System Actions:**
-[Report from SAVE_SCHEDULE_RESULT: tasks saved, duplicates skipped, events created]
+[tasks saved count and duplicates skipped from SAVE_SCHEDULE_RESULT]
 • Notes saved to knowledge base
-
-[If Google Doc was created successfully:]
-📄 **Google Doc:** [paste the doc_url from create_meeting_doc result]
 
 📊 **Pipeline:** 4 agents · Tasks + Calendar + Notes + Google Workspace MCP
 
 ---
 ✨ **Try:** "What tasks are pending?" · "Create a doc for this meeting" · "Mark [task] as done"
+
+Rules: no JSON, no code blocks. Output must start with ✅ **Meeting Processed Successfully**.
 """,
-    tools=[create_meeting_doc],
+    tools=[],
     output_key="final_briefing"
 )
 
@@ -591,10 +573,34 @@ Use these tools for analytics questions:
 "What topics keep coming up?" / "Recurring themes?" → get_recurring_topics()
 "Weekly trends" / "Task completion over time" → get_task_completion_trends()
 "How many meetings per week?" / "Meeting velocity?" → get_meeting_velocity()
-"What's overdue?" / "Overdue tasks?" → get_overdue_tasks()
+"What's overdue?" / "Overdue tasks?" / "Follow-up report" → get_overdue_tasks(), then format as follow-up report (see below)
 "Quality scores" / "How well did MeetingMind process?" → get_latest_quality_scores()
 
 Format analytics results clearly with emoji headers and tables where appropriate.
+
+═══════════════════════════════════════════
+OVERDUE FOLLOW-UP REPORT
+═══════════════════════════════════════════
+
+When user asks about overdue tasks, call get_overdue_tasks() then format the response like this:
+
+⏰ **Overdue Tasks — Follow-Up Report**
+*Generated: [today's date]*
+
+---
+
+Group tasks by owner. For each owner write:
+
+**[Owner Name]** · [N] overdue task(s)
+[List each task: • [task name] — was due [deadline] — Priority: High/Medium/Low]
+
+📧 **Draft follow-up:**
+> Hi [Owner], just a quick check-in — [task name(s)] [was/were] due on [date]. Could you share a status update? Let me know if you need anything to move this forward.
+
+---
+
+Repeat for each owner. End with a one-line summary:
+📊 [X] overdue tasks across [N] owners.
 
 ═══════════════════════════════════════════
 SEMANTIC SEARCH
@@ -908,7 +914,7 @@ transcript_pipeline = SequentialAgent(
 root_agent = Agent(
     name="meetingmind",
     model=model_name,
-    description="MeetingMind — AI Meeting Assistant | Paste transcripts to extract tasks, schedule events & create Google Docs | 8 agents · 4 MCP servers · pgvector semantic search",
+    description="MeetingMind — AI Meeting Assistant | Paste transcripts to extract tasks, schedule events & create Google Docs | 10 agents · 4 MCP servers · pgvector semantic search",
     instruction="""
 You are MeetingMind, an intelligent multi-agent productivity assistant
 built on Google Cloud. You help teams manage meetings, tasks, schedules,

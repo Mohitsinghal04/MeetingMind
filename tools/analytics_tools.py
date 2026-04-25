@@ -189,17 +189,32 @@ def get_overdue_tasks(tool_context: ToolContext) -> dict:
             cur = conn.cursor()
             cur.execute("""
                 SELECT
+                    id,
                     task_name,
                     owner,
                     deadline,
                     priority,
                     status,
-                    (CURRENT_DATE - deadline::date) AS days_overdue
-                FROM tasks
-                WHERE status NOT IN ('Done', 'Cancelled')
-                  AND deadline != 'Not specified'
-                  AND deadline ~ '^\d{4}-\d{2}-\d{2}$'
-                  AND deadline::date < CURRENT_DATE
+                    (CURRENT_DATE - parsed_date) AS days_overdue
+                FROM (
+                    SELECT
+                        id, task_name, owner, deadline, priority, status,
+                        CASE
+                            WHEN deadline ~ '^\d{4}-\d{2}-\d{2}$'
+                                THEN deadline::date
+                            WHEN deadline ~* '^(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2},?\s+\d{4}$'
+                                THEN TO_DATE(deadline, 'Month DD, YYYY')
+                            WHEN deadline ~* '^\d{1,2}\s+(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{4}$'
+                                THEN TO_DATE(deadline, 'DD Month YYYY')
+                            ELSE NULL
+                        END AS parsed_date
+                    FROM tasks
+                    WHERE status NOT IN ('Done', 'Cancelled')
+                      AND deadline IS NOT NULL
+                      AND deadline NOT IN ('Not specified', 'TBD', '', 'N/A')
+                ) sub
+                WHERE parsed_date IS NOT NULL
+                  AND parsed_date < CURRENT_DATE
                 ORDER BY days_overdue DESC
             """)
             rows = cur.fetchall()
@@ -207,12 +222,13 @@ def get_overdue_tasks(tool_context: ToolContext) -> dict:
 
         tasks = [
             {
-                "task_name": r[0],
-                "owner": r[1],
-                "deadline": r[2],
-                "priority": r[3],
-                "status": r[4],
-                "days_overdue": int(r[5]),
+                "id":         str(r[0]),
+                "task_name":  r[1],
+                "owner":      r[2],
+                "deadline":   r[3],
+                "priority":   r[4],
+                "status":     r[5],
+                "days_overdue": int(r[6]),
             }
             for r in rows
         ]

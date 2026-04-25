@@ -133,6 +133,7 @@ else
       --min-instances=0 \
       --max-instances=3 \
       --port=8080 \
+      --timeout=300 \
       --allow-unauthenticated \
       --update-labels=hackathon=gen-ai-academy-apac \
       --platform=managed

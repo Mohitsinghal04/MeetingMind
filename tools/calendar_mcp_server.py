@@ -221,6 +221,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 "description": description,
                 "meeting_link": meet_link,
                 "calendar_link": created_event.get('htmlLink', ''),
+                "calendar_link_html": f"[📅 Click here to add to Google Calendar]({created_event.get('htmlLink', '')}) _(Ctrl+Click or Cmd+Click to open in new tab)_",
                 "status": "✅ REAL Calendar Event Created",
                 "source": "Google Calendar API via MCP",
                 "timezone": timezone
@@ -228,9 +229,17 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
             logging.info(f"✅ REAL Calendar event created: '{title}' at {start_time} | Link: {meet_link}")
 
+            calendar_url = event["calendar_link"]
+            link_html = f"[📅 Click here to add to Google Calendar]({calendar_url}) _(Ctrl+Click or Cmd+Click to open in new tab)_"
             return [TextContent(
                 type="text",
-                text=str({"status": "success", "event": event, "real_event": True})
+                text=str({
+                    "status": "success",
+                    "event": event,
+                    "real_event": True,
+                    "calendar_link_html": link_html,
+                    "calendar_url": calendar_url,
+                })
             )]
 
         except HttpError as e:

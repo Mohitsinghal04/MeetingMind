@@ -8,8 +8,17 @@ import logging
 import os
 import re
 import datetime
+import psycopg2
 from typing import Optional
 from google.adk.tools.tool_context import ToolContext
+
+
+def _get_db_conn():
+    return psycopg2.connect(
+        host=os.getenv("DB_HOST"), dbname=os.getenv("DB_NAME"),
+        user=os.getenv("DB_USER"), password=os.getenv("DB_PASSWORD"),
+        port=int(os.getenv("DB_PORT", 5432)),
+    )
 
 
 def _build_html(title: str, summary: str, tasks_markdown: str) -> str:
@@ -123,6 +132,18 @@ def create_meeting_doc(
 
         doc_url = blob.public_url
         logging.info(f"Meeting doc saved to GCS: {doc_url}")
+
+        # Persist doc_url back to the meetings table
+        meeting_id = tool_context.state.get("current_meeting_id") if tool_context else None
+        if meeting_id:
+            try:
+                with _get_db_conn() as conn:
+                    cur = conn.cursor()
+                    cur.execute("UPDATE meetings SET doc_url = %s WHERE id = %s", (doc_url, str(meeting_id)))
+                    conn.commit()
+                    cur.close()
+            except Exception as db_err:
+                logging.warning(f"Could not save doc_url to DB: {db_err}")
 
         return {
             "status":  "success",

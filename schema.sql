@@ -21,8 +21,12 @@ CREATE TABLE IF NOT EXISTS meetings (
     summary     TEXT,
     session_id  VARCHAR(255),
     created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    embedding   vector(768)   -- Vertex AI embedding of summary
+    embedding   vector(768),  -- Vertex AI embedding of summary
+    doc_url     TEXT          -- GCS public URL of the published meeting doc
 );
+
+-- Add doc_url to existing deployments that predate this column
+ALTER TABLE meetings ADD COLUMN IF NOT EXISTS doc_url TEXT;
 
 CREATE TABLE IF NOT EXISTS tasks (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),

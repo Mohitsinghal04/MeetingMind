@@ -750,7 +750,7 @@ def list_all_meetings(tool_context: ToolContext, limit: int = 20) -> dict:
                 "meeting_id": m['id'],
                 "title": title,
                 "created_at": m['created_at'].isoformat() if hasattr(m['created_at'], 'isoformat') else str(m['created_at']),
-                "summary_preview": summary[:200] + "..." if len(summary) > 200 else summary
+                "summary": summary
             })
 
         return {
