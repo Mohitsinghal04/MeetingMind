@@ -764,11 +764,13 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
             <div className="w-7 h-7 rounded-full bg-indigo-100 flex items-center justify-center text-sm shrink-0">⚡</div>
             <div className="bg-white border border-gray-100 rounded-2xl rounded-bl-none px-4 py-3 shadow-sm min-w-[260px]">
               <p className="text-xs text-gray-500 mb-3 flex items-center gap-1.5 font-medium">
-                <span className="animate-spin inline-block">⚙️</span>
-                {isTranscript ? 'Pipeline running…' : 'Agents working…'}
+                <span className={pipelineStage >= PIPELINE_STAGES.length ? 'inline-block' : 'animate-spin inline-block'}>⚙️</span>
+                {isTranscript
+                  ? pipelineStage >= PIPELINE_STAGES.length ? 'Pipeline complete — assembling briefing…' : 'Pipeline running…'
+                  : 'Agents working…'}
               </p>
               {isTranscript ? (
-                <PipelineVisualizer currentStage={pipelineStage} complete={false} />
+                <PipelineVisualizer currentStage={pipelineStage} complete={pipelineStage >= PIPELINE_STAGES.length} />
               ) : (
                 <div className="flex gap-1.5">
                   {['Thinking', 'Querying', 'Writing'].map((s, i) => (
