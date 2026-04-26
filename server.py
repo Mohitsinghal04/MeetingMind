@@ -84,6 +84,40 @@ class _MockCtx:
 _session_service = InMemorySessionService()
 _runner: Optional[Runner] = None
 
+# ── Model fallback ─────────────────────────────────────────
+# On 429 (quota exhausted) the Vertex AI SDK raises immediately.
+# We cycle through models until one succeeds.
+_PRIMARY_MODEL = os.getenv("MODEL", "gemini-2.5-flash")
+_EVAL_MODEL    = os.getenv("EVAL_MODEL", "gemini-2.5-flash-lite")
+_FALLBACK_MODELS = [
+    _PRIMARY_MODEL,
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-pro",
+]
+# Remove duplicates while preserving order
+_FALLBACK_MODELS = list(dict.fromkeys(_FALLBACK_MODELS))
+
+# Lock: prevent two concurrent requests from patching agents simultaneously
+_model_lock = asyncio.Lock()
+
+
+def _collect_llm_agents(agent, _seen: set | None = None) -> list:
+    """Return every LLM Agent node in the hierarchy (skips Sequential/Parallel wrappers)."""
+    if _seen is None:
+        _seen = set()
+    if id(agent) in _seen:
+        return []
+    _seen.add(id(agent))
+    result = [agent] if hasattr(agent, "model") else []
+    for sub in getattr(agent, "sub_agents", []) or []:
+        result.extend(_collect_llm_agents(sub, _seen))
+    return result
+
+
+def _is_429(exc: Exception) -> bool:
+    s = str(exc).lower()
+    return "429" in str(exc) or "resource_exhausted" in s or "quota" in s or "rateerror" in s
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -131,8 +165,8 @@ def _clean_response(text: str) -> str:
     if not text:
         return "⚠️ No response from agents."
 
-    # 1. If the briefing marker exists anywhere, extract from that point
-    for marker in ("✅ **Meeting Processed", "📋 **Summary", "✅ **"):
+    # 1. Only extract from a pipeline-briefing marker — never from generic ✅ lines
+    for marker in ("✅ Meeting Processed Successfully", "✅ **Meeting Processed"):
         idx = text.find(marker)
         if idx >= 0:
             text = text[idx:]
@@ -204,18 +238,51 @@ async def chat(req: ChatRequest):
         error_holder: list = []
 
         async def run_agent():
-            try:
-                async for event in _runner.run_async(
-                    user_id=user_id,
-                    session_id=session_id,
-                    new_message=content,
-                ):
-                    if event.is_final_response() and event.content:
-                        for part in event.content.parts or []:
-                            if hasattr(part, "text") and part.text:
-                                response_text_ref[0] += part.text
-            except Exception as exc:
-                error_holder.append(str(exc))
+            """Run the agent with automatic model fallback on 429."""
+            llm_agents = _collect_llm_agents(root_agent)
+
+            async with _model_lock:
+                tried = []
+                for model in _FALLBACK_MODELS:
+                    tried.append(model)
+
+                    # Patch every LLM agent except the eval agent (keeps its own quota pool)
+                    for a in llm_agents:
+                        if getattr(a, "model", None) != _EVAL_MODEL:
+                            a.model = model
+
+                    if model != _PRIMARY_MODEL:
+                        logger.warning(f"⚡ 429 quota hit — retrying with fallback model: {model}")
+
+                    try:
+                        async for event in _runner.run_async(
+                            user_id=user_id,
+                            session_id=session_id,
+                            new_message=content,
+                        ):
+                            if event.is_final_response() and event.content:
+                                for part in event.content.parts or []:
+                                    if hasattr(part, "text") and part.text:
+                                        response_text_ref[0] += part.text
+                        return  # success — stop trying further models
+
+                    except Exception as exc:
+                        if _is_429(exc):
+                            continue  # try next fallback model immediately
+                        # Non-429 error — surface it directly
+                        error_holder.append(str(exc))
+                        return
+
+                # All models exhausted
+                error_holder.append(
+                    f"⚠️ All models rate-limited (tried: {', '.join(tried)}). "
+                    "Please wait ~1 minute and try again."
+                )
+
+            # Always restore primary model for the next request
+            for a in llm_agents:
+                if getattr(a, "model", None) != _EVAL_MODEL:
+                    a.model = _PRIMARY_MODEL
 
         response_text_ref = [""]
         agent_task = asyncio.create_task(run_agent())

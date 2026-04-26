@@ -88,6 +88,190 @@ const meetingTitle = (summary) => {
   return summary.split('.')[0].replace(/^The /i, '').slice(0, 35)
 }
 
+// ── Meeting Briefing Parser + Card ────────────────────────────────────────────
+
+function parseBriefing(text) {
+  if (!text?.includes('✅ Meeting Processed Successfully')) return null
+
+  const get = (pattern) => { const m = text.match(pattern); return m?.[1]?.trim() ?? null }
+
+  // Summary block
+  const summary = get(/📋 Summary:\n([\s\S]*?)(?=\n✅ Action Items:|\n💾 System Actions:|$)/)
+
+  // Action items — each line: • Priority — Task — Owner: X — Due: Y
+  const actionBlock = get(/✅ Action Items:\n([\s\S]*?)(?=\n💾 System Actions:|$)/)
+  const actions = (actionBlock ?? '').split('\n')
+    .filter(l => l.trim().startsWith('•'))
+    .map(line => {
+      const m = line.match(/^[•]\s*(High|Medium|Low)\s*[—–]\s*(.+?)\s*[—–]\s*Owner:\s*(.+?)\s*[—–]\s*Due:\s*(.+)$/i)
+      if (m) return { priority: m[1], task: m[2].trim(), owner: m[3].trim(), due: m[4].trim() }
+      // Fallback: just the raw line
+      return { priority: null, task: line.replace(/^[•]\s*/, '').trim(), owner: null, due: null }
+    })
+    .filter(a => a.task)
+
+  // System actions summary line (e.g. "3 tasks saved and 1 calendar event created.")
+  const systemActions = get(/💾 System Actions:\n(.*?)(?:\n|$)/)
+
+  // Calendar URL from markdown link or raw href
+  const calUrl = text.match(/\[(?:Click here[^\]]*)\]\((https?:\/\/[^\)]+)\)/i)?.[1]
+    ?? text.match(/https:\/\/calendar\.google\.com\/[^\s\)]+/)?.[0]
+    ?? null
+
+  // Google Doc URL
+  const docUrl = text.match(/\[(?:view|open|here)[^\]]*\]\((https?:\/\/docs\.google\.com\/[^\)]+)\)/i)?.[1]
+    ?? text.match(/https:\/\/docs\.google\.com\/document\/[^\s\)]+/)?.[0]
+    ?? null
+
+  // Pipeline descriptor
+  const pipeline = get(/📊 Pipeline:\s*(.+)/)
+
+  // "Try:" suggestion chips
+  const trySuggestions = get(/✨ Try:\s*(.+)/)
+    ?.split('·').map(s => s.replace(/^["']|["']$/g, '').trim()).filter(Boolean) ?? []
+
+  // Meeting cost estimate
+  // Count unique non-trivial owners as a proxy for attendees, then add ~30% buffer
+  // for attendees who didn't take on tasks (observers, facilitators)
+  const uniqueOwners = [...new Set(
+    actions.map(a => a.owner).filter(o => o && o !== 'Unassigned' && o.length > 1)
+  )]
+  const attendeeCount = Math.max(2, Math.round(uniqueOwners.length * 1.3))
+  // Loaded cost: 45-min meeting × $150/hr per person (includes salary + benefits + overhead)
+  const meetingCostUSD = Math.round(attendeeCount * 0.75 * 150)
+
+  return { summary, actions, systemActions, calUrl, docUrl, pipeline, trySuggestions, attendeeCount, meetingCostUSD }
+}
+
+const PRIORITY_STYLE = {
+  High:   'bg-red-100 text-red-700 border border-red-200',
+  Medium: 'bg-amber-100 text-amber-700 border border-amber-200',
+  Low:    'bg-emerald-100 text-emerald-700 border border-emerald-200',
+}
+
+function MeetingBriefingCard({ text, onSuggest }) {
+  const p = useMemo(() => parseBriefing(text), [text])
+  const [summaryOpen, setSummaryOpen] = useState(false)
+  if (!p) return null
+
+  const highCount = p.actions.filter(a => a.priority === 'High').length
+  const medCount  = p.actions.filter(a => a.priority === 'Medium').length
+
+  return (
+    <div className="space-y-2.5 text-sm w-full">
+
+      {/* ── Header ── */}
+      <div className="flex items-center gap-2">
+        <span className="w-5 h-5 rounded-full bg-emerald-100 flex items-center justify-center text-xs shrink-0">✅</span>
+        <span className="font-semibold text-emerald-700 text-sm">Meeting Processed Successfully</span>
+        {p.actions.length > 0 && (
+          <span className="ml-auto text-[10px] font-bold bg-emerald-50 text-emerald-600 border border-emerald-200 rounded-full px-2 py-0.5">
+            {p.actions.length} tasks
+          </span>
+        )}
+      </div>
+
+      {/* ── Meeting cost ── */}
+      {p.meetingCostUSD > 0 && (
+        <div className="flex items-center gap-3 bg-gradient-to-r from-amber-50 to-yellow-50 border border-amber-100 rounded-xl px-3 py-2">
+          <span className="text-base">💰</span>
+          <div className="flex-1 min-w-0">
+            <span className="text-xs font-bold text-amber-700">Est. meeting cost: </span>
+            <span className="text-sm font-bold text-amber-800">${p.meetingCostUSD.toLocaleString()}</span>
+            <span className="text-[10px] text-amber-500 ml-1">({p.attendeeCount} attendees × 45 min × $150/hr)</span>
+          </div>
+          <span className="text-[10px] text-amber-400 shrink-0 hidden sm:block">Catalyst saved this automatically</span>
+        </div>
+      )}
+
+      {/* ── Summary ── */}
+      {p.summary && (
+        <div className="bg-indigo-50 border border-indigo-100 rounded-xl overflow-hidden">
+          <button
+            onClick={() => setSummaryOpen(v => !v)}
+            className="w-full flex items-center justify-between px-3 py-2 text-left"
+          >
+            <span className="text-[11px] font-bold text-indigo-600 uppercase tracking-wider">📋 Summary</span>
+            <span className="text-[10px] text-indigo-400">{summaryOpen ? '▲ less' : '▼ more'}</span>
+          </button>
+          {summaryOpen && (
+            <p className="px-3 pb-3 text-xs text-gray-700 leading-relaxed border-t border-indigo-100">{p.summary}</p>
+          )}
+        </div>
+      )}
+
+      {/* ── Action Items ── */}
+      {p.actions.length > 0 && (
+        <div className="bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
+          <div className="px-3 py-2 bg-gray-50 border-b border-gray-100 flex items-center gap-2">
+            <span className="text-[11px] font-bold text-gray-600 uppercase tracking-wider">Action Items</span>
+            {highCount > 0 && <span className="text-[9px] font-bold bg-red-100 text-red-600 rounded-full px-1.5 py-0.5">{highCount} High</span>}
+            {medCount  > 0 && <span className="text-[9px] font-bold bg-amber-100 text-amber-600 rounded-full px-1.5 py-0.5">{medCount} Med</span>}
+          </div>
+          <div className="divide-y divide-gray-50">
+            {p.actions.map((a, i) => (
+              <div key={i} className="flex items-start gap-2 px-3 py-2 hover:bg-gray-50/60 transition-colors">
+                {a.priority
+                  ? <span className={`shrink-0 text-[9px] font-bold px-1.5 py-0.5 rounded-full mt-0.5 ${PRIORITY_STYLE[a.priority] ?? 'bg-gray-100 text-gray-500'}`}>{a.priority}</span>
+                  : <span className="shrink-0 text-gray-300 mt-1">•</span>
+                }
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs text-gray-800 font-medium leading-snug">{a.task}</p>
+                  <div className="flex flex-wrap gap-2 mt-0.5">
+                    {a.owner && <span className="text-[10px] text-indigo-500">👤 {a.owner}</span>}
+                    {a.due && a.due !== 'TBD' && <span className="text-[10px] text-gray-400">🗓 {a.due}</span>}
+                    {a.due === 'TBD' && <span className="text-[10px] text-gray-400">🗓 TBD</span>}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── Footer chips ── */}
+      <div className="flex flex-wrap gap-1.5">
+        {p.systemActions && (
+          <span className="text-[11px] bg-gray-100 text-gray-600 rounded-lg px-2 py-1">💾 {p.systemActions}</span>
+        )}
+        {p.calUrl && (
+          <a href={p.calUrl} target="_blank" rel="noopener noreferrer"
+            className="text-[11px] bg-blue-50 text-blue-700 border border-blue-100 rounded-lg px-2 py-1 hover:bg-blue-100 transition-colors font-medium">
+            📅 Add to Calendar
+          </a>
+        )}
+        {p.docUrl && (
+          <a href={p.docUrl} target="_blank" rel="noopener noreferrer"
+            className="text-[11px] bg-emerald-50 text-emerald-700 border border-emerald-100 rounded-lg px-2 py-1 hover:bg-emerald-100 transition-colors font-medium">
+            📄 Open Doc
+          </a>
+        )}
+      </div>
+
+      {/* ── Pipeline info ── */}
+      {p.pipeline && (
+        <p className="text-[10px] text-gray-400 leading-relaxed">📊 {p.pipeline}</p>
+      )}
+
+      {/* ── Try suggestions ── */}
+      {p.trySuggestions.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 pt-0.5">
+          {p.trySuggestions.map((s, i) => (
+            <button
+              key={i}
+              onClick={() => onSuggest?.(s)}
+              className="text-[11px] bg-indigo-50 text-indigo-600 border border-indigo-100 rounded-full px-2.5 py-0.5 hover:bg-indigo-100 transition-colors"
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+      )}
+
+    </div>
+  )
+}
+
 // Detect if a message is a task-update command
 const isTaskUpdate = (msg) =>
   /\b(mark|done|complete|in progress|update|finish|finished|status)\b/i.test(msg)
@@ -229,6 +413,7 @@ Sarah: Great. Let's reconvene next week with updates. Meeting adjourned.`
 const WELCOME = '⚡ **Welcome to Catalyst!**\n*Raw meetings. Structured action.*\n\nI\'m powered by **8 specialized agents** and **4 MCP servers** working together.\n\n**Try:**\n- Paste any meeting transcript (500+ chars)\n- "What tasks are pending?"\n- "Who has the most tasks?"\n- "What\'s overdue?"'
 
 const MESSAGES_KEY = 'mm_messages'
+const MESSAGES_VERSION = 'catalyst_v2'   // bump this to flush stale localStorage on deploy
 
 // ── Speech Recognition hook ────────────────────────────────
 // ── Toast notification ─────────────────────────────────────
@@ -250,11 +435,12 @@ function useSpeechRecognition({ onFinalText, onInterim, onToast }) {
   const timerRef = useRef(null)
   const [isRecording, setIsRecording] = useState(false)
   const [duration,    setDuration]    = useState(0)
-  const [supported,   setSupported]   = useState(false)
+  const [supported,   setSupported]   = useState(
+    () => !!(window.SpeechRecognition || window.webkitSpeechRecognition)
+  )
 
   useEffect(() => {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition
-    setSupported(!!SR)
+    setSupported(!!(window.SpeechRecognition || window.webkitSpeechRecognition))
   }, [])
 
   const start = useCallback(() => {
@@ -331,6 +517,13 @@ function timeAgo(ts) {
 function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
   const [messages, setMessages] = useState(() => {
     try {
+      // Flush stale messages when the app version changes (e.g. MeetingMind → Catalyst rename)
+      const storedVersion = localStorage.getItem('mm_version')
+      if (storedVersion !== MESSAGES_VERSION) {
+        localStorage.removeItem(MESSAGES_KEY)
+        localStorage.setItem('mm_version', MESSAGES_VERSION)
+        return [{ role: 'assistant', text: WELCOME, ts: Date.now() }]
+      }
       const saved = localStorage.getItem(MESSAGES_KEY)
       return saved ? JSON.parse(saved) : [{ role: 'assistant', text: WELCOME, ts: Date.now() }]
     } catch { return [{ role: 'assistant', text: WELCOME, ts: Date.now() }] }
@@ -531,21 +724,31 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
                 {m.role === 'assistant' && (
                   <div className="w-7 h-7 rounded-full bg-indigo-100 flex items-center justify-center text-sm mr-2 mt-0.5 shrink-0">⚡</div>
                 )}
-                <div className={`max-w-[85%] min-w-0 rounded-2xl px-4 py-3 text-sm leading-relaxed shadow-sm ${
-                  m.role === 'user'
-                    ? 'bg-indigo-600 text-white rounded-br-none'
-                    : 'bg-white text-gray-800 rounded-bl-none border border-gray-100'
-                }`} style={{ wordBreak: 'break-word', overflowWrap: 'anywhere' }}>
-                  {m.role === 'assistant' ? (
-                    <div
-                      className="prose prose-sm max-w-none prose-p:my-1 prose-ul:my-1 prose-pre:overflow-x-auto prose-pre:whitespace-pre-wrap"
-                      style={{ wordBreak: 'break-word', overflowWrap: 'anywhere' }}
-                      dangerouslySetInnerHTML={{ __html: renderMd(m.text) }}
-                    />
-                  ) : (
-                    <span style={{ wordBreak: 'break-word', overflowWrap: 'anywhere' }}>{m.text}</span>
-                  )}
-                </div>
+                {(() => {
+                  let isBriefing = false
+                  try { isBriefing = !!parseBriefing(m.text) } catch {}
+                  return (
+                    <div className={`min-w-0 rounded-2xl px-4 py-3 text-sm leading-relaxed shadow-sm ${
+                      m.role === 'user'
+                        ? 'max-w-[85%] bg-indigo-600 text-white rounded-br-none'
+                        : isBriefing
+                          ? 'w-full max-w-[92%] bg-white text-gray-800 rounded-bl-none border border-gray-100'
+                          : 'max-w-[85%] bg-white text-gray-800 rounded-bl-none border border-gray-100'
+                    }`} style={{ wordBreak: 'break-word', overflowWrap: 'anywhere' }}>
+                      {m.role === 'assistant' ? (
+                        isBriefing
+                          ? <MeetingBriefingCard text={m.text} onSuggest={(s) => { setInput(s) }} />
+                          : <div
+                              className="prose prose-sm max-w-none prose-p:my-1 prose-ul:my-1 prose-pre:overflow-x-auto prose-pre:whitespace-pre-wrap"
+                              style={{ wordBreak: 'break-word', overflowWrap: 'anywhere' }}
+                              dangerouslySetInnerHTML={{ __html: renderMd(m.text) }}
+                            />
+                      ) : (
+                        <span style={{ wordBreak: 'break-word', overflowWrap: 'anywhere' }}>{m.text}</span>
+                      )}
+                    </div>
+                  )
+                })()}
               </div>
               {m.ts && (
                 <span className={`text-[10px] text-gray-400 mt-0.5 ${m.role === 'user' ? 'pr-1' : 'pl-9'}`}>
@@ -626,7 +829,7 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
                 : 'border-gray-200 focus:border-indigo-400 focus:ring-indigo-50 bg-gray-50'
             }`}
             rows={2}
-            placeholder={isRecording ? 'Recording… speak your meeting transcript' : 'Paste a transcript or ask a question…'}
+            placeholder={isRecording ? '🎙 Recording… speak naturally — names, tasks, deadlines' : 'Paste a transcript, ask a question, or 🎙 record a live meeting…'}
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={onKey}
@@ -635,33 +838,42 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
           <div className="flex flex-col gap-1.5 shrink-0">
             {/* Mic button */}
             {supported && (
-              <button
-                onClick={toggleMic}
-                disabled={loading}
-                title={isRecording ? 'Stop recording' : 'Record live meeting'}
-                className={`p-2.5 rounded-xl text-sm font-semibold transition-all shadow-sm disabled:opacity-40 disabled:cursor-not-allowed ${
-                  isRecording
-                    ? 'bg-red-500 hover:bg-red-600 text-white ring-2 ring-red-300 ring-offset-1'
-                    : 'bg-gray-100 hover:bg-gray-200 text-gray-600'
-                }`}
-              >
-                {isRecording ? (
-                  <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-                    <rect x="6" y="6" width="12" height="12" rx="2"/>
-                  </svg>
-                ) : (
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round"
-                      d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/>
-                    <path strokeLinecap="round" strokeLinejoin="round"
-                      d="M19 10v2a7 7 0 01-14 0v-2M12 19v4M8 23h8"/>
-                  </svg>
-                )}
-              </button>
+              <div className="flex flex-col items-center gap-0.5">
+                <button
+                  onClick={toggleMic}
+                  disabled={loading}
+                  title={isRecording ? 'Stop recording' : 'Speak your meeting aloud — Catalyst will process it live'}
+                  className={`relative p-2.5 rounded-xl text-sm font-semibold transition-all shadow-sm disabled:opacity-40 disabled:cursor-not-allowed ${
+                    isRecording
+                      ? 'bg-red-500 hover:bg-red-600 text-white ring-2 ring-red-300 ring-offset-1'
+                      : 'bg-violet-100 hover:bg-violet-200 text-violet-600 ring-1 ring-violet-200'
+                  }`}
+                >
+                  {/* Pulse ring when idle */}
+                  {!isRecording && !loading && (
+                    <span className="absolute inset-0 rounded-xl ring-2 ring-violet-400 animate-ping opacity-30 pointer-events-none" />
+                  )}
+                  {isRecording ? (
+                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                      <rect x="6" y="6" width="12" height="12" rx="2"/>
+                    </svg>
+                  ) : (
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round"
+                        d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/>
+                      <path strokeLinecap="round" strokeLinejoin="round"
+                        d="M19 10v2a7 7 0 01-14 0v-2M12 19v4M8 23h8"/>
+                    </svg>
+                  )}
+                </button>
+                <span className={`text-[9px] font-semibold tracking-tight text-center leading-tight ${isRecording ? 'text-red-500' : 'text-violet-500'}`}>
+                  {isRecording ? 'Stop' : 'Live'}
+                </span>
+              </div>
             )}
             {/* Send button */}
             <button
-              onClick={send}
+              onClick={() => send()}
               disabled={loading || !input.trim()}
               className="px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow-sm"
             >
@@ -673,7 +885,10 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
           <p className="text-xs text-gray-400">
             {isRecording
               ? '🔴 Recording live — click ■ to stop, then Send to process'
-              : <span>Enter to send · Shift+Enter newline · <kbd className="px-1 py-0.5 bg-gray-100 rounded text-[10px] font-mono text-gray-500">⌘K</kbd> focus</span>
+              : <span>
+                  {supported && <span className="mr-1">🎙 record ·</span>}
+                  Enter to send · Shift+Enter newline · <kbd className="px-1 py-0.5 bg-gray-100 rounded text-[10px] font-mono text-gray-500">⌘K</kbd> focus
+                </span>
             }
           </p>
           {input.length > 0 && (
@@ -1381,6 +1596,59 @@ function MeetingsPanel() {
   )
 }
 
+// ── SVG Trend Line Chart ───────────────────────────────────
+function TrendLineChart({ weeks }) {
+  if (!weeks?.length) return null
+  const W = 400, H = 130
+  const pad = { t: 14, r: 14, b: 26, l: 28 }
+  const cW = W - pad.l - pad.r, cH = H - pad.t - pad.b
+  const maxVal = Math.max(...weeks.flatMap(w => [w.tasks_created ?? 0, w.tasks_completed ?? 0]), 1)
+  const xp = i => pad.l + (weeks.length > 1 ? (i / (weeks.length - 1)) * cW : cW / 2)
+  const yp = v => pad.t + cH - (v / maxVal) * cH
+  const pts = key => weeks.map((w, i) => `${xp(i)},${yp(w[key] ?? 0)}`).join(' ')
+  const area = key => `${xp(0)},${pad.t + cH} ${pts(key)} ${xp(weeks.length - 1)},${pad.t + cH}`
+  const gridVals = [0, Math.round(maxVal * 0.5), maxVal]
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: 130 }}>
+      <defs>
+        <linearGradient id="lg-c" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#6366f1" stopOpacity="0.2"/><stop offset="100%" stopColor="#6366f1" stopOpacity="0"/>
+        </linearGradient>
+        <linearGradient id="lg-d" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#10b981" stopOpacity="0.2"/><stop offset="100%" stopColor="#10b981" stopOpacity="0"/>
+        </linearGradient>
+      </defs>
+      {/* Grid */}
+      {gridVals.map((v, i) => (
+        <g key={i}>
+          <line x1={pad.l} x2={W - pad.r} y1={yp(v)} y2={yp(v)} stroke={i === 0 ? '#e5e7eb' : '#f3f4f6'} strokeWidth="1"/>
+          <text x={pad.l - 4} y={yp(v) + 3} textAnchor="end" fontSize="7.5" fill="#cbd5e1">{v}</text>
+        </g>
+      ))}
+      {/* Area fills */}
+      <polygon points={area('tasks_created')} fill="url(#lg-c)"/>
+      <polygon points={area('tasks_completed')} fill="url(#lg-d)"/>
+      {/* Lines */}
+      <polyline points={pts('tasks_created')} fill="none" stroke="#6366f1" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round"/>
+      <polyline points={pts('tasks_completed')} fill="none" stroke="#10b981" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round"/>
+      {/* Dots */}
+      {weeks.map((w, i) => (
+        <g key={i}>
+          <circle cx={xp(i)} cy={yp(w.tasks_created ?? 0)} r="4" fill="white" stroke="#6366f1" strokeWidth="2"/>
+          <circle cx={xp(i)} cy={yp(w.tasks_completed ?? 0)} r="4" fill="white" stroke="#10b981" strokeWidth="2"/>
+        </g>
+      ))}
+      {/* X labels */}
+      {weeks.map((w, i) => {
+        const lbl = String(w.week_label ?? w.week ?? `W${i+1}`)
+        const short = lbl.includes('-') ? lbl.slice(5) : lbl.slice(0, 5)
+        return <text key={i} x={xp(i)} y={H - 5} textAnchor="middle" fontSize="8" fill="#94a3b8">{short}</text>
+      })}
+    </svg>
+  )
+}
+
 // ── Analytics Panel ────────────────────────────────────────
 
 function StatCard({ label, value, sub, color, icon }) {
@@ -1586,6 +1854,38 @@ function AnalyticsPanel({ onOwnerClick, onTabChange, onTasksNav, onTaskUpdated }
         </div>
       </div>
 
+      {/* Smart Insights */}
+      {(() => {
+        const insights = []
+        if (overdueList.length > 0) {
+          const w = overdueList[0]
+          insights.push({ icon: '⚠️', text: `"${w.task_name.slice(0, 40)}${w.task_name.length > 40 ? '…' : ''}" is ${w.days_overdue}d overdue`, color: 'text-red-600 bg-red-50 border-red-100' })
+        }
+        const overloaded = owners.find(o => o.high_priority_open > 2)
+        if (overloaded) insights.push({ icon: '🔥', text: `${overloaded.owner} has ${overloaded.high_priority_open} high-priority tasks open`, color: 'text-orange-600 bg-orange-50 border-orange-100' })
+        const lastWeek = weeks[weeks.length - 1]
+        if (lastWeek) {
+          const created = lastWeek.tasks_created ?? 0, done = lastWeek.tasks_completed ?? 0
+          if (done > created && done > 0) insights.push({ icon: '🚀', text: 'Closing faster than creating this week — great momentum!', color: 'text-emerald-600 bg-emerald-50 border-emerald-100' })
+          else if (created - done > 2) insights.push({ icon: '📈', text: `${created - done} more tasks added than closed this week — backlog growing`, color: 'text-amber-600 bg-amber-50 border-amber-100' })
+        }
+        if (completionPct >= 75) insights.push({ icon: '🏆', text: `${completionPct}% overall completion rate — excellent team performance`, color: 'text-indigo-600 bg-indigo-50 border-indigo-100' })
+        if (!insights.length) return null
+        return (
+          <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
+            <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3">💡 Insights</h3>
+            <div className="space-y-2">
+              {insights.map((ins, i) => (
+                <div key={i} className={`flex items-start gap-2 text-xs font-medium px-3 py-2 rounded-lg border ${ins.color}`}>
+                  <span className="shrink-0">{ins.icon}</span>
+                  <span>{ins.text}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )
+      })()}
+
       {/* Task Ownership — click bar to filter task board */}
       {owners.length > 0 && (
         <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
@@ -1659,34 +1959,24 @@ function AnalyticsPanel({ onOwnerClick, onTabChange, onTasksNav, onTaskUpdated }
         </div>
       )}
 
-      {/* Weekly Trend */}
+      {/* Weekly Trend — SVG Line Chart */}
       {weeks.length > 0 && (
         <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
-          <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-4">Weekly Activity</h3>
-          <div className="flex items-end gap-2 h-24">
-            {weeks.map((w, i) => {
-              const maxVal = Math.max(...weeks.map(x => x.tasks_created ?? x.created ?? 0), 1)
-              const created   = w.tasks_created ?? w.created   ?? 0
-              const completed = w.tasks_completed ?? w.completed ?? 0
-              return (
-                <div key={i} className="flex-1 flex flex-col items-center gap-1">
-                  <div className="w-full flex gap-0.5 items-end h-16">
-                    <div className="flex-1 bg-indigo-200 rounded-t transition-all" style={{ height: `${(created/maxVal)*100}%`, minHeight: created ? 4 : 0 }} title={`Created: ${created}`} />
-                    <div className="flex-1 bg-emerald-400 rounded-t transition-all" style={{ height: `${(completed/maxVal)*100}%`, minHeight: completed ? 4 : 0 }} title={`Done: ${completed}`} />
-                  </div>
-                  <span className="text-xs text-gray-400 truncate w-full text-center">
-                    {w.week_label ?? w.week ?? `W${i+1}`}
-                  </span>
-                </div>
-              )
-            })}
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider">Weekly Activity</h3>
+            <div className="flex gap-3">
+              <span className="flex items-center gap-1.5 text-xs text-gray-500">
+                <span className="w-3 h-1.5 rounded-full bg-indigo-500 inline-block"/>Created
+              </span>
+              <span className="flex items-center gap-1.5 text-xs text-gray-500">
+                <span className="w-3 h-1.5 rounded-full bg-emerald-500 inline-block"/>Completed
+              </span>
+            </div>
           </div>
-          <div className="flex gap-4 mt-2">
-            <span className="flex items-center gap-1.5 text-xs text-gray-500"><span className="w-3 h-3 rounded-sm bg-indigo-200 inline-block"/>Created</span>
-            <span className="flex items-center gap-1.5 text-xs text-gray-500"><span className="w-3 h-3 rounded-sm bg-emerald-400 inline-block"/>Completed</span>
-          </div>
+          <TrendLineChart weeks={weeks} />
         </div>
       )}
+
     </div>
   )
 }
@@ -1794,6 +2084,14 @@ export default function App() {
   const [ownerFilter,    setOwnerFilter]    = useState(null)
   const [statusFilter,   setStatusFilter]   = useState('all')
   const [tabCounts,      setTabCounts]      = useState({ tasks: 0, overdue: 0, meetings: 0 })
+  const [bannerDismissed, setBannerDismissed] = useState(false)
+
+  // Re-show banner whenever overdue count increases
+  const prevOverdue = useRef(0)
+  useEffect(() => {
+    if (tabCounts.overdue > prevOverdue.current) setBannerDismissed(false)
+    prevOverdue.current = tabCounts.overdue
+  }, [tabCounts.overdue])
 
   // Fetch counts for tab badges — pure DB reads, no LLM
   useEffect(() => {
@@ -1869,6 +2167,29 @@ export default function App() {
           )})}
 
         </div>
+
+        {/* Overdue banner — shows whenever there are overdue tasks */}
+        {!bannerDismissed && tabCounts.overdue > 0 && (
+          <div className="mx-4 mt-2.5 mb-0.5 flex items-center gap-3 bg-red-50 border border-red-200 rounded-xl px-4 py-2.5 shrink-0 shadow-sm">
+            <span className="text-base shrink-0">⚠️</span>
+            <p className="text-sm text-red-700 flex-1 font-medium">
+              <span className="font-bold">{tabCounts.overdue} task{tabCounts.overdue > 1 ? 's' : ''} overdue</span>
+              {' — '}
+              <button
+                onClick={() => { handleTasksNav('Overdue') }}
+                className="underline underline-offset-2 hover:text-red-900 transition-colors"
+              >
+                view &amp; mark done
+              </button>
+              {' or ask Catalyst "What\'s overdue?"'}
+            </p>
+            <button
+              onClick={() => setBannerDismissed(true)}
+              className="shrink-0 text-red-400 hover:text-red-600 transition-colors text-lg leading-none"
+              title="Dismiss"
+            >×</button>
+          </div>
+        )}
 
         {/* Tab content */}
         <div className="flex-1 overflow-hidden">

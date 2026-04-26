@@ -222,9 +222,8 @@ def assemble_briefing_from_state(tool_context: ToolContext) -> str:
         f"{tasks}\n\n"
         "💾 **System Actions:**\n"
         f"{save_result}\n"
-        "• Notes saved to knowledge base\n\n"
+        "📝 Notes saved to knowledge base\n\n"
         "📊 **Pipeline:** 3 stages · Notes ∥ Quality Eval · Tasks + Calendar + Google Workspace MCP\n\n"
-        "---\n"
         '✨ **Try:** "What tasks are pending?" · "Create a doc for this meeting" · "Mark [task] as done"'
     )
     tool_context.state["final_briefing"] = briefing
@@ -665,6 +664,37 @@ Use these tools for analytics questions:
 Format analytics results clearly with emoji headers and tables where appropriate.
 
 ═══════════════════════════════════════════
+PROACTIVE DAILY BRIEFING
+═══════════════════════════════════════════
+
+When user asks "what needs my attention", "daily briefing", "morning briefing", "catch me up",
+"what's urgent", "what should I focus on", "team status", "standup update", or similar:
+
+1. Call get_overdue_tasks() — overdue items
+2. Call get_task_ownership_stats() — workload per person
+3. Call list_my_tasks(priority="High", status="Pending") — urgent open tasks
+
+Then format a proactive briefing like this:
+
+🌅 **Daily Briefing** · *[Today's date]*
+
+⚠️ **Overdue ([N] tasks)**
+[List top 3: • task name — owner — X days late]
+[If more: + X more overdue tasks]
+
+🔥 **High Priority Open ([N] tasks)**
+[List top 3 closest to deadline: • task name — owner — due date]
+
+📊 **Team Workload**
+[Top 2 owners by task count: • Owner: N tasks (X% done, Y high-priority open)]
+[Flag anyone with >3 high-priority open tasks as overloaded]
+
+💡 **Recommended Focus**
+[1–2 sentence recommendation on what to tackle first based on overdue + priority data]
+
+Keep the briefing concise — this is a quick morning scan, not a report.
+
+═══════════════════════════════════════════
 OVERDUE FOLLOW-UP REPORT
 ═══════════════════════════════════════════
 
@@ -1070,7 +1100,7 @@ PASS 1 — KEYWORD TRIGGERS (High Confidence):
 2. If message contains ["mark", "mark as", "update status", "schedule", "set to", "complete", "set up", "book", "book a", "create a meeting", "arrange a meeting", "organise a meeting", "organize a meeting", "cancel meeting", "reschedule", "move meeting", "add to calendar", "put on calendar"]:
    → INTENT C (COMMAND) - call set_user_command immediately
 
-3. If message starts with or contains ["what", "show me", "list", "find", "search", "get", "pending", "which", "who has", "overdue", "recurring", "analytics", "trending", "velocity", "quality score", "create a doc", "google doc", "make a document", "search drive", "send email", "email summary"]:
+3. If message starts with or contains ["what", "show me", "list", "find", "search", "get", "pending", "which", "who has", "overdue", "recurring", "analytics", "trending", "velocity", "quality score", "create a doc", "google doc", "make a document", "search drive", "send email", "email summary", "attention", "needs my attention", "daily briefing", "morning briefing", "what's urgent", "what should i focus", "who is overloaded", "team status", "catch me up", "catchup", "standup", "what's happening"]:
    → INTENT B/F (QUESTION/WORKSPACE) - call set_user_query immediately
 
 4. If message length > 500 characters AND contains ["meeting", "discussed", "action items", "attendees", "decisions", "agenda"]:
