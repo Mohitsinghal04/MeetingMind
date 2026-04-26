@@ -795,7 +795,7 @@ function exportTasksCSV(tasks, label = 'all-tasks') {
   URL.revokeObjectURL(url)
 }
 
-function TaskBoard({ refreshTrigger, ownerFilter, onClearOwner, statusFilter, onClearStatus }) {
+function TaskBoard({ refreshTrigger, ownerFilter, onClearOwner, statusFilter, onClearStatus, onCountsChange }) {
   const [tasks,      setTasks]      = useState([])
   const [loading,    setLoading]    = useState(true)
   const [filter,     setFilter]     = useState(statusFilter ?? 'all')
@@ -834,6 +834,15 @@ function TaskBoard({ refreshTrigger, ownerFilter, onClearOwner, statusFilter, on
     const d = new Date(t.deadline)
     return !isNaN(d) && d < today
   }
+
+  // Propagate live counts to App whenever tasks change (inline edits, bulk actions, etc.)
+  // This keeps the tab badge accurate without a full re-fetch.
+  useEffect(() => {
+    if (!onCountsChange || loading) return
+    const openCount   = tasks.filter(t => t.status === 'Pending' || t.status === 'In Progress').length
+    const overdueCount = tasks.filter(isOverdue).length
+    onCountsChange({ tasks: openCount, overdue: overdueCount })
+  }, [tasks, loading])  // eslint-disable-line react-hooks/exhaustive-deps
 
   const filters = [
     { id: 'all',         label: 'All' },
@@ -1183,13 +1192,14 @@ function TaskBoard({ refreshTrigger, ownerFilter, onClearOwner, statusFilter, on
 // ── Meetings Panel ─────────────────────────────────────────
 
 function MeetingsPanel() {
-  const [meetings,  setMeetings]  = useState([])
-  const [taskMap,   setTaskMap]   = useState({})  // meeting_id → {total, done}
-  const [tasksByMeeting, setTasksByMeeting] = useState({}) // meeting_id → task[]
-  const [loading,   setLoading]   = useState(true)
-  const [expanded,  setExpanded]  = useState(null)
-  const [search,    setSearch]    = useState('')
-  const [copied,    setCopied]    = useState(null) // meeting_id of copied card
+  const [meetings,      setMeetings]      = useState([])
+  const [taskMap,       setTaskMap]       = useState({})   // meeting_id → {total, done}
+  const [tasksByMeeting,setTasksByMeeting]= useState({})   // meeting_id → task[]
+  const [loading,       setLoading]       = useState(true)
+  const [expanded,      setExpanded]      = useState(null)
+  const [expandedTasks, setExpandedTasks] = useState(new Set()) // meeting_ids showing all tasks
+  const [search,        setSearch]        = useState('')
+  const [copied,        setCopied]        = useState(null) // meeting_id of copied card
 
   useEffect(() => {
     Promise.all([
@@ -1316,21 +1326,45 @@ function MeetingsPanel() {
                     </p>
                     {taskMap[m.meeting_id]?.total > 0 && (() => {
                       const mTasks = tasksByMeeting[m.meeting_id] || []
-                      return mTasks.length > 0 ? (
+                      if (!mTasks.length) return null
+                      const showAll = expandedTasks.has(m.meeting_id)
+                      const visible = showAll ? mTasks : mTasks.slice(0, 5)
+                      const remaining = mTasks.length - 5
+                      return (
                         <div className="px-4 pb-3 border-t border-gray-100 mt-1">
-                          <p className="text-[10px] font-semibold uppercase text-gray-400 tracking-wider mb-1.5 pt-2">Tasks</p>
+                          <div className="flex items-center justify-between pt-2 mb-1.5">
+                            <p className="text-[10px] font-semibold uppercase text-gray-400 tracking-wider">
+                              Tasks ({mTasks.length})
+                            </p>
+                            {mTasks.length > 5 && (
+                              <button
+                                onClick={() => setExpandedTasks(prev => {
+                                  const next = new Set(prev)
+                                  next.has(m.meeting_id) ? next.delete(m.meeting_id) : next.add(m.meeting_id)
+                                  return next
+                                })}
+                                className="text-[10px] text-indigo-500 hover:text-indigo-700 font-semibold hover:underline transition-colors"
+                              >
+                                {showAll ? '▲ Show less' : `+${remaining} more`}
+                              </button>
+                            )}
+                          </div>
                           <div className="space-y-1">
-                            {mTasks.slice(0, 5).map((t, ti) => (
+                            {visible.map((t, ti) => (
                               <div key={ti} className="flex items-center gap-2 text-xs">
-                                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${t.status === 'Done' ? 'bg-emerald-400' : t.status === 'Cancelled' ? 'bg-gray-300' : 'bg-indigo-400'}`} />
-                                <span className={`flex-1 truncate ${t.status === 'Done' ? 'line-through text-gray-400' : 'text-gray-600'}`}>{t.task_name}</span>
-                                <span className="text-gray-400 shrink-0">{t.owner}</span>
+                                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                                  t.status === 'Done' ? 'bg-emerald-400' :
+                                  t.status === 'Cancelled' ? 'bg-gray-300' : 'bg-indigo-400'
+                                }`} />
+                                <span className={`flex-1 truncate ${t.status === 'Done' ? 'line-through text-gray-400' : 'text-gray-600'}`}>
+                                  {t.task_name}
+                                </span>
+                                <span className="text-gray-400 shrink-0 ml-2">{t.owner}</span>
                               </div>
                             ))}
-                            {mTasks.length > 5 && <p className="text-[10px] text-gray-400 pl-3.5">+{mTasks.length - 5} more</p>}
                           </div>
                         </div>
-                      ) : null
+                      )
                     })()}
                   </div>
                 )}
@@ -1823,7 +1857,7 @@ export default function App() {
 
         {/* Tab content */}
         <div className="flex-1 overflow-hidden">
-          {tab === 'tasks'     && <TaskBoard     refreshTrigger={refreshTrigger} ownerFilter={ownerFilter} onClearOwner={() => setOwnerFilter(null)} statusFilter={statusFilter} onClearStatus={() => setStatusFilter('all')} />}
+          {tab === 'tasks'     && <TaskBoard     refreshTrigger={refreshTrigger} ownerFilter={ownerFilter} onClearOwner={() => setOwnerFilter(null)} statusFilter={statusFilter} onClearStatus={() => setStatusFilter('all')} onCountsChange={(counts) => setTabCounts(prev => ({ ...prev, ...counts }))} />}
           {tab === 'meetings'  && <MeetingsPanel />}
           {tab === 'analytics' && <AnalyticsPanel onOwnerClick={handleOwnerClick} onTabChange={setTab} onTasksNav={handleTasksNav} onTaskUpdated={() => setRefreshTrigger(r => r + 1)} />}
           {tab === 'docs'      && <DocsPanel      refreshTrigger={refreshTrigger} />}

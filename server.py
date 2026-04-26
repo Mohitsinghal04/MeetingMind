@@ -91,7 +91,7 @@ async def lifespan(app: FastAPI):
         app_name="meetingmind",
         session_service=_session_service,
     )
-    logger.info("MeetingMind server ready (8 agents, 4 MCP servers, FastAPI)")
+    logger.info("MeetingMind server ready (8 agents, 1 parallel stage, 4 MCP servers, FastAPI)")
     yield
 
 

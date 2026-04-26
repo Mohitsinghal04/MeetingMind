@@ -220,7 +220,7 @@ def assemble_briefing_from_state(tool_context: ToolContext) -> str:
         "💾 **System Actions:**\n"
         f"{save_result}\n"
         "• Notes saved to knowledge base\n\n"
-        "📊 **Pipeline:** 4 agents · Tasks + Calendar + Notes + Google Workspace MCP\n\n"
+        "📊 **Pipeline:** 3 stages · Notes ∥ Quality Eval · Tasks + Calendar + Google Workspace MCP\n\n"
         "---\n"
         "✨ **Try:** \"What tasks are pending?\" · \"Create a doc for this meeting\" · \"Mark [task] as done\""
     )
@@ -977,13 +977,23 @@ Keep it simple and conversational.
 
 # Sequential pipeline — reliable under Vertex AI quota limits.
 # The parallel agents above demonstrate the intended architecture.
+# Stage 3: notes_agent + evaluation_agent run in PARALLEL
+# - notes_agent:      save note → assemble briefing (Python tool) → returns in ~3s
+# - evaluation_agent: LLM-as-Judge grades quality → saves score to DB → returns in ~6s
+# Total pipeline time = max(notes, eval) NOT sum — zero extra latency on the briefing
+parallel_notes_eval = ParallelAgent(
+    name="parallel_notes_eval",
+    description="Runs notes saving + LLM-as-Judge quality evaluation simultaneously.",
+    sub_agents=[notes_agent, evaluation_agent],
+)
+
 transcript_pipeline = SequentialAgent(
     name="transcript_pipeline",
-    description="3-agent pipeline: analysis → save+schedule → notes+briefing",
+    description="4-agent pipeline: analysis → save+schedule → (notes ∥ evaluation)",
     sub_agents=[
         analysis_agent,           # LLM call 1: summarise + extract tasks + save meeting to DB
         save_and_schedule_agent,  # LLM call 2: save tasks to DB + create calendar events
-        notes_agent,              # LLM call 3: save note + search related notes + assemble briefing (Python tool, no extra LLM)
+        parallel_notes_eval,      # LLM call 3a (notes) ∥ 3b (eval) — run simultaneously
     ]
 )
 
