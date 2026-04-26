@@ -1,5 +1,35 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { marked } from 'marked'
+
+// ── Owner avatar helpers ───────────────────────────────────
+const AVATAR_COLORS = [
+  'bg-indigo-500','bg-violet-500','bg-pink-500','bg-rose-500',
+  'bg-amber-500','bg-emerald-500','bg-cyan-500','bg-blue-500',
+]
+function ownerColor(name) {
+  if (!name) return 'bg-gray-400'
+  let h = 0
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) & 0xffff
+  return AVATAR_COLORS[h % AVATAR_COLORS.length]
+}
+function OwnerAvatar({ name, size = 'sm' }) {
+  if (!name || name === '—') return <span className="text-xs text-gray-400">—</span>
+  // Handle multi-owner like "Sarah, John, Alex" — show up to 2 avatars
+  const owners = name.split(/[,/]/).map(s => s.trim()).filter(Boolean).slice(0, 2)
+  const sz = size === 'sm' ? 'w-5 h-5 text-[10px]' : 'w-7 h-7 text-xs'
+  return (
+    <div className="flex items-center gap-1 flex-wrap">
+      {owners.map((o, i) => (
+        <span key={i} className={`${sz} rounded-full ${ownerColor(o)} text-white font-bold flex items-center justify-center shrink-0`} title={o}>
+          {o.slice(0,2).toUpperCase()}
+        </span>
+      ))}
+      {owners.length === 1 && (
+        <span className="text-xs text-gray-600 font-medium truncate max-w-[80px]">{owners[0]}</span>
+      )}
+    </div>
+  )
+}
 
 marked.setOptions({ breaks: true, gfm: true })
 
@@ -284,12 +314,23 @@ function fmtDuration(s) {
   return `${m}:${sec.toString().padStart(2, '0')}`
 }
 
+// ── Relative timestamp ─────────────────────────────────────
+function timeAgo(ts) {
+  if (!ts) return ''
+  const diff = Math.floor((Date.now() - new Date(ts)) / 1000)
+  if (diff < 10)  return 'just now'
+  if (diff < 60)  return `${diff}s ago`
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
+  return `${Math.floor(diff / 86400)}d ago`
+}
+
 function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
   const [messages, setMessages] = useState(() => {
     try {
       const saved = localStorage.getItem(MESSAGES_KEY)
-      return saved ? JSON.parse(saved) : [{ role: 'assistant', text: WELCOME }]
-    } catch { return [{ role: 'assistant', text: WELCOME }] }
+      return saved ? JSON.parse(saved) : [{ role: 'assistant', text: WELCOME, ts: Date.now() }]
+    } catch { return [{ role: 'assistant', text: WELCOME, ts: Date.now() }] }
   })
   const [input,         setInput]         = useState('')
   const [loading,       setLoading]       = useState(false)
@@ -334,11 +375,23 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, loading])
 
+  // Cmd+K / Ctrl+K — focus chat input from anywhere
+  useEffect(() => {
+    const handler = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault()
+        inputRef.current?.focus()
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [])
+
   const send = async () => {
     const msg = input.trim()
     if (!msg || loading) return
     setInput('')
-    setMessages(m => [...m, { role: 'user', text: msg }])
+    setMessages(m => [...m, { role: 'user', text: msg, ts: Date.now() }])
     setLoading(true)
     const wasTaskCommand  = isTaskUpdate(msg)
     const msgIsTranscript = msg.length > 400
@@ -393,7 +446,7 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
         reply += '\n\n📄 Google Doc saved — view it in the **Docs** tab'
       }
 
-      setMessages(m => [...m, { role: 'assistant', text: reply }])
+      setMessages(m => [...m, { role: 'assistant', text: reply, ts: Date.now() }])
 
       if (isProcessed) {
         onTranscriptProcessed?.()
@@ -406,7 +459,7 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
               const q = await fetch('/api/quality').then(r => r.json())
               const latest = (q?.quality_scores ?? [])[0] ?? null
               if (latest?.overall_score != null) {
-                setMessages(m => [...m, { role: 'quality', data: latest }])
+                setMessages(m => [...m, { role: 'quality', data: latest, ts: Date.now() }])
                 return   // got it — stop
               }
             } catch {}
@@ -417,7 +470,7 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
         onTaskUpdated?.()
       }
     } catch (e) {
-      setMessages(m => [...m, { role: 'assistant', text: `⚠️ ${e.message}` }])
+      setMessages(m => [...m, { role: 'assistant', text: `⚠️ ${e.message}`, ts: Date.now() }])
     } finally {
       setLoading(false)
       setPipelineStage(-1)
@@ -469,25 +522,32 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
             )
           }
           return (
-            <div key={i} className={`flex min-w-0 ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              {m.role === 'assistant' && (
-                <div className="w-7 h-7 rounded-full bg-indigo-100 flex items-center justify-center text-sm mr-2 mt-0.5 shrink-0">🧠</div>
-              )}
-              <div className={`max-w-[85%] min-w-0 rounded-2xl px-4 py-3 text-sm leading-relaxed shadow-sm ${
-                m.role === 'user'
-                  ? 'bg-indigo-600 text-white rounded-br-none'
-                  : 'bg-white text-gray-800 rounded-bl-none border border-gray-100'
-              }`} style={{ wordBreak: 'break-word', overflowWrap: 'anywhere' }}>
-                {m.role === 'assistant' ? (
-                  <div
-                    className="prose prose-sm max-w-none prose-p:my-1 prose-ul:my-1 prose-pre:overflow-x-auto prose-pre:whitespace-pre-wrap"
-                    style={{ wordBreak: 'break-word', overflowWrap: 'anywhere' }}
-                    dangerouslySetInnerHTML={{ __html: renderMd(m.text) }}
-                  />
-                ) : (
-                  <span style={{ wordBreak: 'break-word', overflowWrap: 'anywhere' }}>{m.text}</span>
+            <div key={i} className={`flex flex-col min-w-0 ${m.role === 'user' ? 'items-end' : 'items-start'}`}>
+              <div className={`flex min-w-0 w-full ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                {m.role === 'assistant' && (
+                  <div className="w-7 h-7 rounded-full bg-indigo-100 flex items-center justify-center text-sm mr-2 mt-0.5 shrink-0">🧠</div>
                 )}
+                <div className={`max-w-[85%] min-w-0 rounded-2xl px-4 py-3 text-sm leading-relaxed shadow-sm ${
+                  m.role === 'user'
+                    ? 'bg-indigo-600 text-white rounded-br-none'
+                    : 'bg-white text-gray-800 rounded-bl-none border border-gray-100'
+                }`} style={{ wordBreak: 'break-word', overflowWrap: 'anywhere' }}>
+                  {m.role === 'assistant' ? (
+                    <div
+                      className="prose prose-sm max-w-none prose-p:my-1 prose-ul:my-1 prose-pre:overflow-x-auto prose-pre:whitespace-pre-wrap"
+                      style={{ wordBreak: 'break-word', overflowWrap: 'anywhere' }}
+                      dangerouslySetInnerHTML={{ __html: renderMd(m.text) }}
+                    />
+                  ) : (
+                    <span style={{ wordBreak: 'break-word', overflowWrap: 'anywhere' }}>{m.text}</span>
+                  )}
+                </div>
               </div>
+              {m.ts && (
+                <span className={`text-[10px] text-gray-400 mt-0.5 ${m.role === 'user' ? 'pr-1' : 'pl-9'}`}>
+                  {timeAgo(m.ts)}
+                </span>
+              )}
             </div>
           )
         })}
@@ -605,11 +665,21 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
             </button>
           </div>
         </div>
-        <p className="text-xs text-gray-400 mt-1.5 pl-1">
-          {isRecording
-            ? '🔴 Recording live — click ■ to stop, then Send to process'
-            : 'Enter to send · Shift+Enter for newline · 🎙 mic to record live'}
-        </p>
+        <div className="flex items-center justify-between mt-1.5 pl-1">
+          <p className="text-xs text-gray-400">
+            {isRecording
+              ? '🔴 Recording live — click ■ to stop, then Send to process'
+              : <span>Enter to send · Shift+Enter newline · <kbd className="px-1 py-0.5 bg-gray-100 rounded text-[10px] font-mono text-gray-500">⌘K</kbd> focus</span>
+            }
+          </p>
+          {input.length > 0 && (
+            <span className={`text-[10px] font-medium tabular-nums transition-colors ${
+              input.length >= 500 ? 'text-emerald-600 font-semibold' : 'text-gray-400'
+            }`}>
+              {input.length}{input.length >= 500 ? ' ✓ transcript detected' : ' / 500'}
+            </span>
+          )}
+        </div>
       </div>
     </div>
     </>
@@ -732,6 +802,8 @@ function TaskBoard({ refreshTrigger, ownerFilter, onClearOwner, statusFilter, on
   const [search,     setSearch]     = useState('')
   const [sortBy,     setSortBy]     = useState('priority') // 'priority' | 'deadline'
   const [detailTask, setDetailTask] = useState(null)       // task detail modal
+  const [selected,   setSelected]   = useState(new Set())  // bulk select
+  const [flashId,    setFlashId]    = useState(null)       // row flash after status change
 
   // Sync external statusFilter (e.g. from Analytics nav)
   useEffect(() => {
@@ -934,10 +1006,59 @@ function TaskBoard({ refreshTrigger, ownerFilter, onClearOwner, statusFilter, on
             <p className="text-gray-400 text-xs">No tasks match "{search}"</p>
           </div>
         ) : (
+          <>{selected.size > 0 && (
+            <div className="sticky top-0 z-20 flex items-center gap-2 px-5 py-2 bg-indigo-50 border-b border-indigo-200">
+              <span className="text-xs font-semibold text-indigo-700">{selected.size} selected</span>
+              <button
+                onClick={async () => {
+                  const ids = [...selected]
+                  // Optimistic UI update
+                  setTasks(prev => prev.map(t => ids.includes(t.id) ? { ...t, status: 'Done' } : t))
+                  setSelected(new Set())
+                  // Persist to DB — all in parallel
+                  const results = await Promise.all(ids.map(id =>
+                    fetch(`/api/tasks/${id}`, {
+                      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ status: 'Done' }),
+                    }).then(r => r.ok ? 'ok' : 'fail').catch(() => 'fail')
+                  ))
+                  // If any failed, reload from DB to restore true state
+                  if (results.includes('fail')) load()
+                }}
+                className="px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-600 text-white hover:bg-emerald-700 transition-colors"
+              >✓ Mark Done</button>
+              <button
+                onClick={async () => {
+                  const ids = [...selected]
+                  // Optimistic UI update
+                  setTasks(prev => prev.map(t => ids.includes(t.id) ? { ...t, status: 'Cancelled' } : t))
+                  setSelected(new Set())
+                  // Persist to DB — all in parallel
+                  const results = await Promise.all(ids.map(id =>
+                    fetch(`/api/tasks/${id}`, {
+                      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ status: 'Cancelled' }),
+                    }).then(r => r.ok ? 'ok' : 'fail').catch(() => 'fail')
+                  ))
+                  // If any failed, reload from DB to restore true state
+                  if (results.includes('fail')) load()
+                }}
+                className="px-2.5 py-1 rounded-full text-xs font-semibold bg-gray-500 text-white hover:bg-gray-600 transition-colors"
+              >✕ Cancel</button>
+              <button onClick={() => setSelected(new Set())} className="ml-auto text-xs text-indigo-400 hover:text-indigo-700">Clear</button>
+            </div>
+          )}
           <table className="w-full text-sm border-collapse">
             <thead className="sticky top-0 bg-gray-50 z-10">
               <tr className="text-xs uppercase text-gray-400 border-b border-gray-200">
-                <th className="text-left py-2.5 px-5 font-semibold">Task</th>
+                <th className="py-2.5 px-3 w-8">
+                  <input type="checkbox"
+                    className="rounded cursor-pointer accent-indigo-600"
+                    checked={visible.length > 0 && visible.every(t => selected.has(t.id))}
+                    onChange={e => setSelected(e.target.checked ? new Set(visible.map(t => t.id)) : new Set())}
+                  />
+                </th>
+                <th className="text-left py-2.5 px-2 font-semibold">Task</th>
                 <th className="text-left py-2.5 px-3 font-semibold">Owner</th>
                 <th className="text-left py-2.5 px-3 font-semibold">Priority</th>
                 <th className="text-left py-2.5 px-3 font-semibold">Deadline</th>
@@ -952,20 +1073,23 @@ function TaskBoard({ refreshTrigger, ownerFilter, onClearOwner, statusFilter, on
                   <tr
                     key={t.id || idx}
                     onClick={() => setDetailTask(t)}
-                    className={`border-b border-gray-50 transition-colors cursor-pointer ${
-                      isDone ? 'bg-gray-50/50 hover:bg-gray-100/50' : 'hover:bg-indigo-50/40'
+                    className={`border-b border-gray-50 transition-all duration-500 cursor-pointer ${
+                      flashId === t.id ? 'bg-emerald-50' : selected.has(t.id) ? 'bg-indigo-50/60' : isDone ? 'bg-gray-50/50 hover:bg-gray-100/50' : 'hover:bg-indigo-50/40'
                     }`}
                   >
-                    <td className="py-3 px-5 w-[40%]">
+                    <td className="py-3 px-3 w-8" onClick={e => { e.stopPropagation(); setSelected(prev => { const n = new Set(prev); n.has(t.id) ? n.delete(t.id) : n.add(t.id); return n }) }}>
+                      <input type="checkbox" className="rounded cursor-pointer accent-indigo-600"
+                        checked={selected.has(t.id)} onChange={() => {}} />
+                    </td>
+                    <td className="py-3 px-2 w-[38%]">
                       <span className={`block font-medium leading-snug ${isDone ? 'line-through text-gray-400' : 'text-gray-800'}`}>
                         {t.task_name}
                       </span>
-                      <span className="text-xs text-gray-400 mt-0.5 hidden group-hover:block">Click for details</span>
                     </td>
                     <td className="py-3 px-3 whitespace-nowrap">
-                      <span className={`text-xs font-medium ${isDone ? 'text-gray-400' : 'text-gray-600'}`}>
-                        {t.owner || '—'}
-                      </span>
+                      <div className={isDone ? 'opacity-40' : ''}>
+                        <OwnerAvatar name={t.owner} />
+                      </div>
                     </td>
                     <td className="py-3 px-3">
                       <span className={`px-2 py-0.5 rounded-md text-xs font-semibold ${isDone ? 'opacity-40' : ''} ${priorityBadge(t.priority)}`}>
@@ -980,7 +1104,7 @@ function TaskBoard({ refreshTrigger, ownerFilter, onClearOwner, statusFilter, on
                         {/* Calendar edit icon — always visible on hover */}
                         <label
                           title="Edit deadline"
-                          className="opacity-0 group-hover/dl:opacity-100 transition-opacity cursor-pointer text-gray-400 hover:text-indigo-500"
+                          className="cursor-pointer text-gray-300 hover:text-indigo-500 transition-colors"
                         >
                           <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
                             <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
@@ -1013,6 +1137,8 @@ function TaskBoard({ refreshTrigger, ownerFilter, onClearOwner, statusFilter, on
                           onChange={async (e) => {
                             const newStatus = e.target.value
                             setTasks(prev => prev.map(x => x.id === t.id ? { ...x, status: newStatus } : x))
+                            setFlashId(t.id)
+                            setTimeout(() => setFlashId(null), 800)
                             try {
                               await fetch(`/api/tasks/${t.id}`, {
                                 method: 'PATCH',
@@ -1046,6 +1172,7 @@ function TaskBoard({ refreshTrigger, ownerFilter, onClearOwner, statusFilter, on
               })}
             </tbody>
           </table>
+          </>
         )}
       </div>
     </div>
@@ -1056,17 +1183,34 @@ function TaskBoard({ refreshTrigger, ownerFilter, onClearOwner, statusFilter, on
 // ── Meetings Panel ─────────────────────────────────────────
 
 function MeetingsPanel() {
-  const [meetings, setMeetings] = useState([])
-  const [loading,  setLoading]  = useState(true)
-  const [expanded, setExpanded] = useState(null)
-  const [search,   setSearch]   = useState('')
+  const [meetings,  setMeetings]  = useState([])
+  const [taskMap,   setTaskMap]   = useState({})  // meeting_id → {total, done}
+  const [tasksByMeeting, setTasksByMeeting] = useState({}) // meeting_id → task[]
+  const [loading,   setLoading]   = useState(true)
+  const [expanded,  setExpanded]  = useState(null)
+  const [search,    setSearch]    = useState('')
+  const [copied,    setCopied]    = useState(null) // meeting_id of copied card
 
   useEffect(() => {
-    fetch('/api/meetings')
-      .then(r => r.json())
-      .then(d => setMeetings(d.meetings || []))
-      .catch(console.error)
-      .finally(() => setLoading(false))
+    Promise.all([
+      fetch('/api/meetings').then(r => r.json()),
+      fetch('/api/tasks').then(r => r.json()),
+    ]).then(([md, td]) => {
+      setMeetings(md.meetings || [])
+      // Build map: meeting_id → { total, done } and meeting_id → task[]
+      const map = {}
+      const byMeeting = {}
+      for (const t of td.tasks || []) {
+        if (!t.meeting_id) continue
+        if (!map[t.meeting_id]) map[t.meeting_id] = { total: 0, done: 0 }
+        map[t.meeting_id].total++
+        if (t.status === 'Done') map[t.meeting_id].done++
+        if (!byMeeting[t.meeting_id]) byMeeting[t.meeting_id] = []
+        byMeeting[t.meeting_id].push(t)
+      }
+      setTaskMap(map)
+      setTasksByMeeting(byMeeting)
+    }).catch(console.error).finally(() => setLoading(false))
   }, [])
 
   const fmt = (iso) => iso
@@ -1119,20 +1263,75 @@ function MeetingsPanel() {
                   onClick={() => setExpanded(expanded === m.meeting_id ? null : m.meeting_id)}
                   className="w-full flex items-center justify-between px-4 py-3.5 hover:bg-gray-50 text-left transition-colors"
                 >
-                  <div className="min-w-0">
+                  <div className="min-w-0 flex-1">
                     <p className="text-sm font-semibold text-gray-800 truncate">{m.title}</p>
-                    <p className="text-xs text-gray-400 mt-0.5">{fmt(m.created_at)}</p>
+                    <div className="flex items-center gap-2 mt-1 flex-wrap">
+                      <p className="text-xs text-gray-400">{fmt(m.created_at)}</p>
+                      {taskMap[m.meeting_id] && (() => {
+                        const { total, done } = taskMap[m.meeting_id]
+                        const pct = total ? Math.round((done / total) * 100) : 0
+                        return (
+                          <div className="flex items-center gap-1.5">
+                            <div className="w-20 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                              <div className={`h-full rounded-full transition-all ${pct === 100 ? 'bg-emerald-500' : 'bg-indigo-500'}`} style={{ width: `${pct}%` }} />
+                            </div>
+                            <span className="text-[10px] text-gray-500 font-medium">{done}/{total}</span>
+                            {pct === 100 && <span className="text-[10px] text-emerald-600 font-bold">✓ All done</span>}
+                          </div>
+                        )
+                      })()}
+                    </div>
                   </div>
-                  <svg
-                    className={`w-4 h-4 text-gray-400 ml-3 shrink-0 transition-transform ${expanded === m.meeting_id ? 'rotate-180' : ''}`}
-                    fill="none" stroke="currentColor" viewBox="0 0 24 24"
-                  >
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                  </svg>
+                  <div className="flex items-center gap-1 ml-2 shrink-0">
+                    {/* Copy summary button */}
+                    <span
+                      role="button"
+                      title="Copy summary"
+                      onClick={e => {
+                        e.stopPropagation()
+                        navigator.clipboard.writeText(m.summary || '').then(() => {
+                          setCopied(m.meeting_id)
+                          setTimeout(() => setCopied(null), 2000)
+                        })
+                      }}
+                      className="p-1 rounded text-gray-300 hover:text-indigo-500 hover:bg-indigo-50 transition-colors"
+                    >
+                      {copied === m.meeting_id
+                        ? <svg className="w-3.5 h-3.5 text-emerald-500" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7"/></svg>
+                        : <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                      }
+                    </span>
+                    <svg
+                      className={`w-4 h-4 text-gray-400 transition-transform ${expanded === m.meeting_id ? 'rotate-180' : ''}`}
+                      fill="none" stroke="currentColor" viewBox="0 0 24 24"
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </div>
                 </button>
                 {expanded === m.meeting_id && (
-                  <div className="px-4 pb-4 pt-3 text-sm text-gray-600 border-t border-gray-100 leading-relaxed bg-gray-50">
-                    {m.summary || 'No summary available.'}
+                  <div className="border-t border-gray-100 bg-gray-50">
+                    <p className="px-4 pt-3 pb-2 text-sm text-gray-600 leading-relaxed">
+                      {m.summary || 'No summary available.'}
+                    </p>
+                    {taskMap[m.meeting_id]?.total > 0 && (() => {
+                      const mTasks = tasksByMeeting[m.meeting_id] || []
+                      return mTasks.length > 0 ? (
+                        <div className="px-4 pb-3 border-t border-gray-100 mt-1">
+                          <p className="text-[10px] font-semibold uppercase text-gray-400 tracking-wider mb-1.5 pt-2">Tasks</p>
+                          <div className="space-y-1">
+                            {mTasks.slice(0, 5).map((t, ti) => (
+                              <div key={ti} className="flex items-center gap-2 text-xs">
+                                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${t.status === 'Done' ? 'bg-emerald-400' : t.status === 'Cancelled' ? 'bg-gray-300' : 'bg-indigo-400'}`} />
+                                <span className={`flex-1 truncate ${t.status === 'Done' ? 'line-through text-gray-400' : 'text-gray-600'}`}>{t.task_name}</span>
+                                <span className="text-gray-400 shrink-0">{t.owner}</span>
+                              </div>
+                            ))}
+                            {mTasks.length > 5 && <p className="text-[10px] text-gray-400 pl-3.5">+{mTasks.length - 5} more</p>}
+                          </div>
+                        </div>
+                      ) : null
+                    })()}
                   </div>
                 )}
               </div>
@@ -1545,6 +1744,29 @@ export default function App() {
   const [refreshTrigger, setRefreshTrigger] = useState(0)
   const [ownerFilter,    setOwnerFilter]    = useState(null)
   const [statusFilter,   setStatusFilter]   = useState('all')
+  const [tabCounts,      setTabCounts]      = useState({ tasks: 0, overdue: 0, meetings: 0 })
+
+  // Fetch counts for tab badges — pure DB reads, no LLM
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const [tr, mr] = await Promise.all([
+          fetch('/api/tasks').then(r => r.json()),
+          fetch('/api/meetings').then(r => r.json()),
+        ])
+        const tasks = tr.tasks || []
+        const today = new Date(); today.setHours(0,0,0,0)
+        const overdue = tasks.filter(t => {
+          if (t.status === 'Done' || t.status === 'Cancelled') return false
+          if (!t.deadline || t.deadline === 'TBD' || t.deadline === 'Not specified') return false
+          const d = new Date(t.deadline)
+          return !isNaN(d) && d < today
+        }).length
+        setTabCounts({ tasks: tasks.filter(t => t.status === 'Pending' || t.status === 'In Progress').length, overdue, meetings: (mr.meetings || []).length })
+      } catch {}
+    }
+    load()
+  }, [refreshTrigger])
 
   const triggerRefresh = () => setRefreshTrigger(n => n + 1)
 
@@ -1572,7 +1794,10 @@ export default function App() {
       <div className="flex-1 flex flex-col overflow-hidden bg-white">
         {/* Tab bar */}
         <div className="flex border-b border-gray-200 px-5 shrink-0 bg-white gap-1">
-          {TABS.map(t => (
+          {TABS.map(t => {
+            const badge = t.id === 'tasks' ? tabCounts.tasks : t.id === 'meetings' ? tabCounts.meetings : 0
+            const hasOverdue = t.id === 'tasks' && tabCounts.overdue > 0
+            return (
             <button
               key={t.id}
               onClick={() => setTab(t.id)}
@@ -1584,8 +1809,16 @@ export default function App() {
             >
               <span>{t.icon}</span>
               {t.label}
+              {badge > 0 && (
+                <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full min-w-[18px] text-center leading-none ${
+                  hasOverdue ? 'bg-red-100 text-red-600' : 'bg-indigo-100 text-indigo-600'
+                }`}>
+                  {hasOverdue ? `${tabCounts.overdue}⏰` : badge}
+                </span>
+              )}
             </button>
-          ))}
+          )})}
+
         </div>
 
         {/* Tab content */}
