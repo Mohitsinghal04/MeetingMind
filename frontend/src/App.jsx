@@ -187,6 +187,76 @@ const WELCOME = '👋 **Welcome to MeetingMind!**\n\nI\'m powered by **8 special
 
 const MESSAGES_KEY = 'mm_messages'
 
+// ── Speech Recognition hook ────────────────────────────────
+function useSpeechRecognition({ onFinalText, onInterim }) {
+  const recRef   = useRef(null)
+  const timerRef = useRef(null)
+  const [isRecording, setIsRecording] = useState(false)
+  const [duration,    setDuration]    = useState(0)
+  const [supported,   setSupported]   = useState(false)
+
+  useEffect(() => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition
+    setSupported(!!SR)
+  }, [])
+
+  const start = useCallback(() => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition
+    if (!SR) return
+    const rec = new SR()
+    rec.continuous      = true
+    rec.interimResults  = true
+    rec.lang            = 'en-US'
+    rec.maxAlternatives = 1
+
+    rec.onresult = (e) => {
+      let interim = ''
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const t = e.results[i][0].transcript
+        if (e.results[i].isFinal) {
+          onFinalText(t.trim() + ' ')
+        } else {
+          interim += t
+        }
+      }
+      onInterim(interim)
+    }
+    rec.onerror = (e) => {
+      if (e.error !== 'no-speech') stop()
+    }
+    rec.onend = () => {
+      // Auto-restart if still recording (browser cuts off after ~60s)
+      if (recRef.current) {
+        try { recRef.current.start() } catch {}
+      }
+    }
+
+    recRef.current = rec
+    rec.start()
+    setIsRecording(true)
+    setDuration(0)
+    timerRef.current = setInterval(() => setDuration(d => d + 1), 1000)
+  }, [onFinalText, onInterim])
+
+  const stop = useCallback(() => {
+    if (recRef.current) {
+      recRef.current.onend = null  // prevent auto-restart
+      recRef.current.stop()
+      recRef.current = null
+    }
+    clearInterval(timerRef.current)
+    setIsRecording(false)
+    setDuration(0)
+  }, [])
+
+  return { isRecording, duration, supported, start, stop }
+}
+
+function fmtDuration(s) {
+  const m = Math.floor(s / 60), sec = s % 60
+  return `${m}:${sec.toString().padStart(2, '0')}`
+}
+
 function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
   const [messages, setMessages] = useState(() => {
     try {
@@ -198,6 +268,7 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
   const [loading,       setLoading]       = useState(false)
   const [pipelineStage, setPipelineStage] = useState(-1)  // -1 = not active
   const [isTranscript,  setIsTranscript]  = useState(false)
+  const [interimText,   setInterimText]   = useState('')
   const [sessionId]                       = useState(() => {
     const k = 'mm_sid'
     return localStorage.getItem(k) || (() => {
@@ -206,7 +277,25 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
       return id
     })()
   })
-  const bottomRef = useRef(null)
+  const bottomRef  = useRef(null)
+  const inputRef   = useRef(null)
+
+  const onFinalText = useCallback((text) => {
+    setInput(prev => prev + text)
+    setInterimText('')
+  }, [])
+
+  const { isRecording, duration, supported, start: startMic, stop: stopMic } =
+    useSpeechRecognition({ onFinalText, onInterim: setInterimText })
+
+  const toggleMic = () => {
+    if (isRecording) {
+      stopMic()
+      setInterimText('')
+    } else {
+      startMic()
+    }
+  }
 
   // Persist messages to localStorage whenever they change
   useEffect(() => {
@@ -415,25 +504,74 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
 
       {/* Input */}
       <div className="px-4 py-3 border-t border-gray-200 bg-white shrink-0">
+        {/* Live mic preview */}
+        {isRecording && (
+          <div className="mb-2 px-3 py-2 bg-red-50 border border-red-200 rounded-xl flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse shrink-0" />
+            <span className="text-xs text-red-600 font-medium shrink-0">{fmtDuration(duration)}</span>
+            <span className="text-xs text-red-500 italic truncate flex-1 min-w-0">
+              {interimText || 'Listening…'}
+            </span>
+            <span className="text-xs text-red-400 shrink-0">Speak clearly</span>
+          </div>
+        )}
         <div className="flex gap-2 items-end">
           <textarea
-            className="flex-1 resize-none border border-gray-200 rounded-xl px-3.5 py-2.5 text-sm focus:outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-50 transition-all bg-gray-50 placeholder-gray-400"
+            ref={inputRef}
+            className={`flex-1 resize-none border rounded-xl px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 transition-all placeholder-gray-400 ${
+              isRecording
+                ? 'border-red-300 focus:border-red-400 focus:ring-red-50 bg-red-50/30'
+                : 'border-gray-200 focus:border-indigo-400 focus:ring-indigo-50 bg-gray-50'
+            }`}
             rows={2}
-            placeholder="Paste a transcript or ask a question…"
+            placeholder={isRecording ? 'Recording… speak your meeting transcript' : 'Paste a transcript or ask a question…'}
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={onKey}
             disabled={loading}
           />
-          <button
-            onClick={send}
-            disabled={loading || !input.trim()}
-            className="px-5 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow-sm"
-          >
-            Send
-          </button>
+          <div className="flex flex-col gap-1.5 shrink-0">
+            {/* Mic button */}
+            {supported && (
+              <button
+                onClick={toggleMic}
+                disabled={loading}
+                title={isRecording ? 'Stop recording' : 'Record live meeting'}
+                className={`p-2.5 rounded-xl text-sm font-semibold transition-all shadow-sm disabled:opacity-40 disabled:cursor-not-allowed ${
+                  isRecording
+                    ? 'bg-red-500 hover:bg-red-600 text-white ring-2 ring-red-300 ring-offset-1'
+                    : 'bg-gray-100 hover:bg-gray-200 text-gray-600'
+                }`}
+              >
+                {isRecording ? (
+                  <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                    <rect x="6" y="6" width="12" height="12" rx="2"/>
+                  </svg>
+                ) : (
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round"
+                      d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/>
+                    <path strokeLinecap="round" strokeLinejoin="round"
+                      d="M19 10v2a7 7 0 01-14 0v-2M12 19v4M8 23h8"/>
+                  </svg>
+                )}
+              </button>
+            )}
+            {/* Send button */}
+            <button
+              onClick={send}
+              disabled={loading || !input.trim()}
+              className="px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow-sm"
+            >
+              Send
+            </button>
+          </div>
         </div>
-        <p className="text-xs text-gray-400 mt-1.5 pl-1">Enter to send · Shift+Enter for newline</p>
+        <p className="text-xs text-gray-400 mt-1.5 pl-1">
+          {isRecording
+            ? '🔴 Recording live — click ■ to stop, then Send to process'
+            : 'Enter to send · Shift+Enter for newline · 🎙 mic to record live'}
+        </p>
       </div>
     </div>
   )
