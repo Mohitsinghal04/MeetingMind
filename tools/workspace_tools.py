@@ -15,8 +15,10 @@ from google.adk.tools.tool_context import ToolContext
 
 def _get_db_conn():
     return psycopg2.connect(
-        host=os.getenv("DB_HOST"), dbname=os.getenv("DB_NAME"),
-        user=os.getenv("DB_USER"), password=os.getenv("DB_PASSWORD"),
+        host=os.getenv("DB_HOST"),
+        dbname=os.getenv("DB_NAME"),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD"),
         port=int(os.getenv("DB_PORT", 5432)),
     )
 
@@ -111,16 +113,18 @@ def create_meeting_doc(
             bucket.iam_configuration.uniform_bucket_level_access_enabled = True
             bucket.patch()
             policy = bucket.get_iam_policy(requested_policy_version=3)
-            policy.bindings.append({
-                "role": "roles/storage.objectViewer",
-                "members": {"allUsers"},
-            })
+            policy.bindings.append(
+                {
+                    "role": "roles/storage.objectViewer",
+                    "members": {"allUsers"},
+                }
+            )
             bucket.set_iam_policy(policy)
             logging.info(f"Created GCS bucket: {bucket_name}")
 
         # Build a URL-safe object name
         slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:80]
-        ts   = datetime.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        ts = datetime.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
         blob_name = f"meetings/{ts}-{slug}.html"
 
         html_content = _build_html(title, summary, tasks_markdown)
@@ -139,23 +143,25 @@ def create_meeting_doc(
             try:
                 with _get_db_conn() as conn:
                     cur = conn.cursor()
-                    cur.execute("UPDATE meetings SET doc_url = %s WHERE id = %s", (doc_url, str(meeting_id)))
+                    cur.execute(
+                        "UPDATE meetings SET doc_url = %s WHERE id = %s", (doc_url, str(meeting_id))
+                    )
                     conn.commit()
                     cur.close()
             except Exception as db_err:
                 logging.warning(f"Could not save doc_url to DB: {db_err}")
 
         return {
-            "status":  "success",
+            "status": "success",
             "doc_url": doc_url,
-            "title":   title,
+            "title": title,
             "message": f"✅ Meeting doc published: {doc_url}",
         }
 
     except Exception as e:
         logging.error(f"create_meeting_doc failed: {e}")
         return {
-            "status":  "error",
+            "status": "error",
             "message": f"Could not save meeting doc: {e}",
             "doc_url": None,
         }
@@ -176,19 +182,23 @@ def search_gdrive(tool_context: ToolContext, query: str) -> dict:
         from google.auth import default
 
         creds, _ = default(scopes=["https://www.googleapis.com/auth/drive.readonly"])
-        service  = build("drive", "v3", credentials=creds)
+        service = build("drive", "v3", credentials=creds)
 
-        results = service.files().list(
-            q=f"(name contains '{query}' or fullText contains '{query}') and trashed=false",
-            pageSize=10,
-            fields="files(id, name, mimeType, webViewLink, modifiedTime)",
-        ).execute()
+        results = (
+            service.files()
+            .list(
+                q=f"(name contains '{query}' or fullText contains '{query}') and trashed=false",
+                pageSize=10,
+                fields="files(id, name, mimeType, webViewLink, modifiedTime)",
+            )
+            .execute()
+        )
 
         files = [
             {
-                "name":     f["name"],
-                "url":      f.get("webViewLink", ""),
-                "type":     f["mimeType"].split(".")[-1],
+                "name": f["name"],
+                "url": f.get("webViewLink", ""),
+                "type": f["mimeType"].split(".")[-1],
                 "modified": f.get("modifiedTime", ""),
             }
             for f in results.get("files", [])
@@ -196,9 +206,9 @@ def search_gdrive(tool_context: ToolContext, query: str) -> dict:
 
         return {
             "status": "success",
-            "query":  query,
-            "count":  len(files),
-            "files":  files,
+            "query": query,
+            "count": len(files),
+            "files": files,
         }
 
     except Exception as e:
@@ -230,25 +240,25 @@ def send_meeting_summary_email(
         from google.auth import default
 
         creds, _ = default(scopes=["https://www.googleapis.com/auth/gmail.send"])
-        service  = build("gmail", "v1", credentials=creds)
+        service = build("gmail", "v1", credentials=creds)
 
-        msg            = MIMEText(body, "html")
-        msg["to"]      = ", ".join(to_emails)
+        msg = MIMEText(body, "html")
+        msg["to"] = ", ".join(to_emails)
         msg["subject"] = subject
         raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
 
         service.users().messages().send(userId="me", body={"raw": raw}).execute()
 
         return {
-            "status":     "success",
-            "message":    f"Email sent to {', '.join(to_emails)}",
+            "status": "success",
+            "message": f"Email sent to {', '.join(to_emails)}",
             "recipients": to_emails,
         }
 
     except Exception as e:
         logging.error(f"send_meeting_summary_email failed: {e}")
         return {
-            "status":  "error",
+            "status": "error",
             "message": (
                 f"Could not send email: {e}. "
                 "Gmail API requires domain-wide delegation for service accounts."

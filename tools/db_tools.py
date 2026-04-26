@@ -22,6 +22,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 
 try:
     from pgvector.psycopg2 import register_vector as _pgvector_register
+
     _PGVECTOR_AVAILABLE = True
 except ImportError:
     _pgvector_register = None
@@ -45,7 +46,7 @@ def _initialize_pool():
             user=os.getenv("DB_USER"),
             password=os.getenv("DB_PASSWORD"),
             port=int(os.getenv("DB_PORT", "5432")),
-            connect_timeout=10
+            connect_timeout=10,
         )
         logging.info("✅ Database connection pool initialized (1-10 connections)")
 
@@ -75,10 +76,12 @@ def get_db_connection():
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=2, max=10),
     retry=retry_if_exception_type(psycopg2.OperationalError),
-    reraise=True
+    reraise=True,
 )
 @timed_operation("save_meeting")
-def save_meeting(tool_context: ToolContext, transcript: str, summary: str, meeting_title: Optional[str] = None) -> dict:
+def save_meeting(
+    tool_context: ToolContext, transcript: str, summary: str, meeting_title: Optional[str] = None
+) -> dict:
     """Save a meeting transcript and summary to the database.
 
     Args:
@@ -99,21 +102,21 @@ def save_meeting(tool_context: ToolContext, transcript: str, summary: str, meeti
             # Extract meeting title from transcript if not provided
             if not meeting_title:
                 # Look for "Meeting Title:" pattern in transcript
-                for line in transcript.split('\n')[:10]:  # Check first 10 lines
-                    if 'Meeting Title:' in line or 'Title:' in line:
-                        meeting_title = line.split(':', 1)[1].strip()
+                for line in transcript.split("\n")[:10]:  # Check first 10 lines
+                    if "Meeting Title:" in line or "Title:" in line:
+                        meeting_title = line.split(":", 1)[1].strip()
                         break
 
                 # If still not found, use first line or default
                 if not meeting_title:
-                    first_line = transcript.split('\n')[0].strip()
+                    first_line = transcript.split("\n")[0].strip()
                     meeting_title = first_line[:100] if len(first_line) > 10 else "Untitled Meeting"
 
             embedding = get_embedding(summary)
             cur.execute(
                 """INSERT INTO meetings (id, transcript, summary, session_id, created_at, embedding)
                    VALUES (%s, %s, %s, %s, %s, %s)""",
-                (meeting_id, transcript, summary, session_id, datetime.utcnow(), embedding)
+                (meeting_id, transcript, summary, session_id, datetime.utcnow(), embedding),
             )
             conn.commit()
             cur.close()
@@ -132,10 +135,12 @@ def save_meeting(tool_context: ToolContext, transcript: str, summary: str, meeti
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=2, max=10),
     retry=retry_if_exception_type(psycopg2.OperationalError),
-    reraise=True
+    reraise=True,
 )
 @timed_operation("save_tasks")
-def save_tasks(tool_context: ToolContext, tasks_json: str, skip_duplicate_check: bool = False) -> dict:
+def save_tasks(
+    tool_context: ToolContext, tasks_json: str, skip_duplicate_check: bool = False
+) -> dict:
     """Save a list of tasks to the database with optional duplicate checking.
 
     Args:
@@ -168,13 +173,17 @@ def save_tasks(tool_context: ToolContext, tasks_json: str, skip_duplicate_check:
 
                 # Check for duplicates unless explicitly skipped
                 if not skip_duplicate_check:
-                    duplicate_check = check_duplicate_tasks(tool_context, task_name, precomputed_embedding=embedding)
+                    duplicate_check = check_duplicate_tasks(
+                        tool_context, task_name, precomputed_embedding=embedding
+                    )
                     if duplicate_check.get("is_duplicate"):
                         existing = duplicate_check.get("existing_task", {})
-                        skipped_duplicates.append({
-                            "task": task_name,
-                            "reason": f"Similar task exists: '{existing.get('task_name')}' ({existing.get('status')})"
-                        })
+                        skipped_duplicates.append(
+                            {
+                                "task": task_name,
+                                "reason": f"Similar task exists: '{existing.get('task_name')}' ({existing.get('status')})",
+                            }
+                        )
                         logging.info(f"⏭️  Skipped duplicate: {task_name}")
                         continue  # Skip saving this task
 
@@ -194,7 +203,7 @@ def save_tasks(tool_context: ToolContext, tasks_json: str, skip_duplicate_check:
                         "Pending",
                         datetime.utcnow(),
                         embedding,
-                    )
+                    ),
                 )
                 saved_ids.append(task_id)
                 logging.info(f"✅ Saved task: {task_name}")
@@ -206,12 +215,14 @@ def save_tasks(tool_context: ToolContext, tasks_json: str, skip_duplicate_check:
                 "status": "success",
                 "tasks_saved": len(saved_ids),
                 "tasks_skipped": len(skipped_duplicates),
-                "task_ids": saved_ids
+                "task_ids": saved_ids,
             }
 
             if skipped_duplicates:
                 result["skipped_details"] = skipped_duplicates
-                logging.info(f"📊 Save summary: {len(saved_ids)} saved, {len(skipped_duplicates)} duplicates skipped")
+                logging.info(
+                    f"📊 Save summary: {len(saved_ids)} saved, {len(skipped_duplicates)} duplicates skipped"
+                )
             else:
                 logging.info(f"📊 Saved {len(saved_ids)} tasks to DB (no duplicates)")
 
@@ -244,7 +255,11 @@ def check_duplicate_tasks(
     try:
         # --- Semantic check (preferred) ---
         if _PGVECTOR_AVAILABLE:
-            embedding = precomputed_embedding if precomputed_embedding is not None else get_embedding(task_name)
+            embedding = (
+                precomputed_embedding
+                if precomputed_embedding is not None
+                else get_embedding(task_name)
+            )
             if embedding is not None:
                 with get_db_connection() as conn:
                     cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
@@ -256,7 +271,7 @@ def check_duplicate_tasks(
                              AND embedding IS NOT NULL
                            ORDER BY embedding <=> %s::vector
                            LIMIT 1""",
-                        (embedding, embedding)
+                        (embedding, embedding),
                     )
                     row = cur.fetchone()
                     cur.close()
@@ -288,7 +303,7 @@ def check_duplicate_tasks(
                    WHERE LOWER(task_name) LIKE LOWER(%s)
                      AND status NOT IN ('Done', 'Cancelled')
                    LIMIT 1""",
-                (f"%{search_term}%",)
+                (f"%{search_term}%",),
             )
             result = cur.fetchone()
             cur.close()
@@ -310,10 +325,7 @@ def check_duplicate_tasks(
         return {"is_duplicate": False, "error": str(e)}
 
 
-def get_meetings_with_task_counts(
-    tool_context: ToolContext,
-    status: Optional[str] = None
-) -> dict:
+def get_meetings_with_task_counts(tool_context: ToolContext, status: Optional[str] = None) -> dict:
     """Get list of meetings with count of tasks matching the status filter.
 
     Args:
@@ -356,22 +368,18 @@ def get_meetings_with_task_counts(
 
             # Extract meeting title from summary (first line)
             for m in meetings:
-                summary = m.get('summary', '')
+                summary = m.get("summary", "")
                 # Take first sentence or first 80 chars as title
-                title = summary.split('.')[0].strip()[:80] if summary else "Untitled Meeting"
-                m['meeting_title'] = title
+                title = summary.split(".")[0].strip()[:80] if summary else "Untitled Meeting"
+                m["meeting_title"] = title
 
                 # Serialize datetime
-                if hasattr(m.get('created_at'), 'isoformat'):
-                    m['created_at'] = m['created_at'].isoformat()
+                if hasattr(m.get("created_at"), "isoformat"):
+                    m["created_at"] = m["created_at"].isoformat()
 
             cur.close()
 
-            return {
-                "status": "success",
-                "meetings": meetings,
-                "count": len(meetings)
-            }
+            return {"status": "success", "meetings": meetings, "count": len(meetings)}
 
     except Exception as e:
         logging.error(f"Error getting meetings: {e}")
@@ -384,7 +392,7 @@ def get_pending_tasks(
     priority: Optional[str] = None,
     status: Optional[str] = None,
     meeting_id: Optional[str] = None,
-    show_all: bool = False
+    show_all: bool = False,
 ) -> dict:
     """Get tasks from the database, optionally filtered.
 
@@ -449,11 +457,7 @@ def get_pending_tasks(
         return {"status": "error", "message": str(e), "tasks": [], "count": 0}
 
 
-def update_task_status(
-    tool_context: ToolContext,
-    task_name: str,
-    new_status: str
-) -> dict:
+def update_task_status(tool_context: ToolContext, task_name: str, new_status: str) -> dict:
     """Update the status of a task by name.
 
     Args:
@@ -469,7 +473,7 @@ def update_task_status(
         if new_status not in valid_statuses:
             return {
                 "status": "error",
-                "message": f"Invalid status. Must be one of: {valid_statuses}"
+                "message": f"Invalid status. Must be one of: {valid_statuses}",
             }
 
         with get_db_connection() as conn:
@@ -481,7 +485,7 @@ def update_task_status(
                    WHERE LOWER(task_name) LIKE LOWER(%s)
                      AND status != 'Done'
                    RETURNING id, task_name, status""",
-                (new_status, f"%{task_name[:40]}%")
+                (new_status, f"%{task_name[:40]}%"),
             )
             updated = cur.fetchall()
             conn.commit()
@@ -495,12 +499,12 @@ def update_task_status(
                     "updated_count": len(updated),
                     "updated_tasks": updated_names,
                     "new_status": new_status,
-                    "message": f"{len(updated)} task(s) marked as {new_status}"
+                    "message": f"{len(updated)} task(s) marked as {new_status}",
                 }
 
             return {
                 "status": "not_found",
-                "message": f"No active task found matching '{task_name}'"
+                "message": f"No active task found matching '{task_name}'",
             }
 
     except Exception as e:
@@ -529,7 +533,7 @@ def save_note(tool_context: ToolContext, title: str, content: str) -> dict:
             cur.execute(
                 """INSERT INTO notes (id, title, content, meeting_id, created_at, embedding)
                    VALUES (%s, %s, %s, %s, %s, %s)""",
-                (note_id, title[:500], content, meeting_id, datetime.utcnow(), embedding)
+                (note_id, title[:500], content, meeting_id, datetime.utcnow(), embedding),
             )
             conn.commit()
             cur.close()
@@ -564,7 +568,7 @@ def search_notes(tool_context: ToolContext, query: str) -> dict:
                       OR LOWER(title)   LIKE LOWER(%s)
                    ORDER BY created_at DESC
                    LIMIT 5""",
-                (search, search)
+                (search, search),
             )
             notes = [dict(row) for row in cur.fetchall()]
 
@@ -598,8 +602,7 @@ def get_note_by_id(tool_context: ToolContext, note_id: str) -> dict:
         with get_db_connection() as conn:
             cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
             cur.execute(
-                "SELECT id, title, content, created_at FROM notes WHERE id = %s",
-                (note_id,)
+                "SELECT id, title, content, created_at FROM notes WHERE id = %s", (note_id,)
             )
             row = cur.fetchone()
             cur.close()
@@ -645,7 +648,7 @@ def save_memory(tool_context: ToolContext, key: str, value: str) -> dict:
                    DO UPDATE SET value = EXCLUDED.value,
                                  created_at = EXCLUDED.created_at,
                                  embedding = EXCLUDED.embedding""",
-                (memory_id, global_session, clean_key, value, datetime.utcnow(), embedding)
+                (memory_id, global_session, clean_key, value, datetime.utcnow(), embedding),
             )
             conn.commit()
             cur.close()
@@ -655,7 +658,7 @@ def save_memory(tool_context: ToolContext, key: str, value: str) -> dict:
                 "status": "success",
                 "key": key,
                 "value": value,
-                "message": f"Remembered: {key}"
+                "message": f"Remembered: {key}",
             }
 
     except Exception as e:
@@ -687,7 +690,7 @@ def get_memory(tool_context: ToolContext, key: Optional[str] = None) -> dict:
                        WHERE key = %s AND session_id IN (%s, %s)
                        ORDER BY CASE WHEN session_id = %s THEN 0 ELSE 1 END
                        LIMIT 5""",
-                    (clean_key, global_session, session_id, global_session)
+                    (clean_key, global_session, session_id, global_session),
                 )
             else:
                 # Return all global preferences + current session memories (deduped by key)
@@ -696,7 +699,7 @@ def get_memory(tool_context: ToolContext, key: Optional[str] = None) -> dict:
                        WHERE session_id IN (%s, %s)
                        ORDER BY key, CASE WHEN session_id = %s THEN 0 ELSE 1 END, created_at DESC
                        LIMIT 30""",
-                    (global_session, session_id, global_session)
+                    (global_session, session_id, global_session),
                 )
 
             memories = [dict(row) for row in cur.fetchall()]
@@ -758,7 +761,7 @@ def list_all_meetings(tool_context: ToolContext, limit: int = 20) -> dict:
                    FROM meetings
                    ORDER BY created_at DESC
                    LIMIT %s""",
-                (limit,)
+                (limit,),
             )
             meetings = [dict(row) for row in cur.fetchall()]
             cur.close()
@@ -768,28 +771,34 @@ def list_all_meetings(tool_context: ToolContext, limit: int = 20) -> dict:
                 "status": "success",
                 "count": 0,
                 "meetings": [],
-                "message": "No meetings found in the database."
+                "message": "No meetings found in the database.",
             }
 
         # Extract titles and format dates
         formatted_meetings = []
         for m in meetings:
             # Extract title from summary (first sentence, max 100 chars)
-            summary = m.get('summary', '')
-            title = summary.split('.')[0].strip()[:100] if summary else "Untitled Meeting"
+            summary = m.get("summary", "")
+            title = summary.split(".")[0].strip()[:100] if summary else "Untitled Meeting"
 
-            formatted_meetings.append({
-                "meeting_id": m['id'],
-                "title": title,
-                "created_at": m['created_at'].isoformat() if hasattr(m['created_at'], 'isoformat') else str(m['created_at']),
-                "summary": summary
-            })
+            formatted_meetings.append(
+                {
+                    "meeting_id": m["id"],
+                    "title": title,
+                    "created_at": (
+                        m["created_at"].isoformat()
+                        if hasattr(m["created_at"], "isoformat")
+                        else str(m["created_at"])
+                    ),
+                    "summary": summary,
+                }
+            )
 
         return {
             "status": "success",
             "count": len(formatted_meetings),
             "meetings": formatted_meetings,
-            "message": f"Found {len(formatted_meetings)} meetings."
+            "message": f"Found {len(formatted_meetings)} meetings.",
         }
 
     except Exception as e:
@@ -818,7 +827,7 @@ def get_meeting_summary(tool_context: ToolContext, meeting_title_keyword: str) -
                    WHERE LOWER(summary) LIKE LOWER(%s)
                    ORDER BY created_at DESC
                    LIMIT 5""",
-                (f"%{meeting_title_keyword}%",)
+                (f"%{meeting_title_keyword}%",),
             )
             meetings = [dict(row) for row in cur.fetchall()]
             cur.close()
@@ -826,36 +835,50 @@ def get_meeting_summary(tool_context: ToolContext, meeting_title_keyword: str) -
         if not meetings:
             return {
                 "status": "not_found",
-                "message": f"No meeting found matching '{meeting_title_keyword}'"
+                "message": f"No meeting found matching '{meeting_title_keyword}'",
             }
 
         if len(meetings) == 1:
             meeting = meetings[0]
             # Extract title from summary (first sentence)
-            title = meeting['summary'].split('.')[0].strip()[:100] if meeting['summary'] else "Untitled Meeting"
+            title = (
+                meeting["summary"].split(".")[0].strip()[:100]
+                if meeting["summary"]
+                else "Untitled Meeting"
+            )
 
             return {
                 "status": "success",
-                "meeting_id": meeting['id'],
+                "meeting_id": meeting["id"],
                 "title": title,
-                "summary": meeting['summary'],  # FULL summary, not truncated
-                "created_at": meeting['created_at'].isoformat() if hasattr(meeting['created_at'], 'isoformat') else str(meeting['created_at'])
+                "summary": meeting["summary"],  # FULL summary, not truncated
+                "created_at": (
+                    meeting["created_at"].isoformat()
+                    if hasattr(meeting["created_at"], "isoformat")
+                    else str(meeting["created_at"])
+                ),
             }
 
         # Multiple matches - return options
         options = []
         for m in meetings:
-            title = m['summary'].split('.')[0].strip()[:100] if m['summary'] else "Untitled Meeting"
-            options.append({
-                "meeting_id": m['id'],
-                "title": title,
-                "created_at": m['created_at'].isoformat() if hasattr(m['created_at'], 'isoformat') else str(m['created_at'])
-            })
+            title = m["summary"].split(".")[0].strip()[:100] if m["summary"] else "Untitled Meeting"
+            options.append(
+                {
+                    "meeting_id": m["id"],
+                    "title": title,
+                    "created_at": (
+                        m["created_at"].isoformat()
+                        if hasattr(m["created_at"], "isoformat")
+                        else str(m["created_at"])
+                    ),
+                }
+            )
 
         return {
             "status": "multiple_matches",
             "message": f"Found {len(meetings)} meetings matching '{meeting_title_keyword}'",
-            "options": options
+            "options": options,
         }
 
     except Exception as e:
@@ -890,7 +913,7 @@ def semantic_search_tasks(tool_context: ToolContext, query_text: str, limit: int
                              AND embedding IS NOT NULL
                            ORDER BY embedding <=> %s::vector
                            LIMIT %s""",
-                        (embedding, embedding, limit)
+                        (embedding, embedding, limit),
                     )
                     rows = [dict(r) for r in cur.fetchall()]
                     cur.close()
@@ -903,7 +926,12 @@ def semantic_search_tasks(tool_context: ToolContext, query_text: str, limit: int
                             t[k] = v.isoformat()
 
                 logging.info(f"Semantic task search '{query_text}' → {len(tasks)} results")
-                return {"status": "success", "tasks": tasks, "count": len(tasks), "method": "semantic"}
+                return {
+                    "status": "success",
+                    "tasks": tasks,
+                    "count": len(tasks),
+                    "method": "semantic",
+                }
 
         # Fallback: LIKE search
         return _like_search_tasks(tool_context, query_text, limit)
@@ -923,7 +951,7 @@ def _like_search_tasks(tool_context: ToolContext, query_text: str, limit: int) -
                    FROM tasks
                    WHERE LOWER(task_name) LIKE LOWER(%s) AND status != 'Done'
                    LIMIT %s""",
-                (f"%{query_text[:40]}%", limit)
+                (f"%{query_text[:40]}%", limit),
             )
             tasks = [dict(r) for r in cur.fetchall()]
             cur.close()
@@ -960,7 +988,7 @@ def semantic_search_notes(tool_context: ToolContext, query_text: str, limit: int
                            WHERE embedding IS NOT NULL
                            ORDER BY embedding <=> %s::vector
                            LIMIT %s""",
-                        (embedding, embedding, limit)
+                        (embedding, embedding, limit),
                     )
                     rows = [dict(r) for r in cur.fetchall()]
                     cur.close()
@@ -972,7 +1000,12 @@ def semantic_search_notes(tool_context: ToolContext, query_text: str, limit: int
                         n["content"] = n["content"][:300] + "..."
 
                 logging.info(f"Semantic notes search '{query_text}' → {len(notes)} results")
-                return {"status": "success", "notes": notes, "count": len(notes), "method": "semantic"}
+                return {
+                    "status": "success",
+                    "notes": notes,
+                    "count": len(notes),
+                    "method": "semantic",
+                }
 
         return search_notes(tool_context, query_text)
 
@@ -1008,7 +1041,7 @@ def semantic_search_memory(tool_context: ToolContext, query_text: str, limit: in
                            WHERE embedding IS NOT NULL
                            ORDER BY embedding <=> %s::vector
                            LIMIT %s""",
-                        (embedding, embedding, limit)
+                        (embedding, embedding, limit),
                     )
                     rows = [dict(r) for r in cur.fetchall()]
                     cur.close()
@@ -1018,7 +1051,12 @@ def semantic_search_memory(tool_context: ToolContext, query_text: str, limit: in
                     m["similarity"] = round(m["similarity"], 3)
 
                 logging.info(f"Semantic memory search '{query_text}' → {len(memories)} results")
-                return {"status": "success", "memories": memories, "count": len(memories), "method": "semantic"}
+                return {
+                    "status": "success",
+                    "memories": memories,
+                    "count": len(memories),
+                    "method": "semantic",
+                }
 
         # Fallback: session-scoped exact key search
         return get_memory(tool_context)
@@ -1043,6 +1081,7 @@ def save_quality_score(tool_context: ToolContext, meeting_id: str, scores: dict)
     """
     try:
         import json as _json
+
         with get_db_connection() as conn:
             cur = conn.cursor()
             score_id = str(uuid.uuid4())
@@ -1061,7 +1100,7 @@ def save_quality_score(tool_context: ToolContext, meeting_id: str, scores: dict)
                     scores.get("overall_score"),
                     _json.dumps(scores.get("flags", [])),
                     _json.dumps(scores.get("recommendations", [])),
-                )
+                ),
             )
             conn.commit()
             cur.close()

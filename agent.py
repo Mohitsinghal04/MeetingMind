@@ -1,15 +1,15 @@
 """
-MeetingMind — Multi-Agent Productivity Assistant (8 Agents)
+Catalyst — Raw meetings. Structured action. (8 Agents)
 Architecture:
   - root_agent              : intent router (orchestrator)
-  - transcript_pipeline     : 4-stage sequential pipeline
+  - transcript_pipeline     : 3-stage pipeline (sequential + parallel)
     → analysis_agent        : summarise + extract tasks + save meeting to DB
     → save_and_schedule_agent: save tasks to DB + create calendar events
-    → notes_agent           : save meeting note + search related past notes
-    → briefing_agent        : assemble final markdown output + create Google Doc
+    → parallel_notes_eval   : ParallelAgent (notes_agent ∥ evaluation_agent)
+       - notes_agent        : save note + assemble briefing [gemini-2.5-flash]
+       - evaluation_agent   : LLM-as-Judge quality score   [gemini-2.5-flash-lite]
   - query_agent             : answers questions via DB, semantic search, analytics
   - execution_agent         : executes commands (mark done, update status, schedule)
-  - memory_store_agent      : stores user preferences and context to long-term memory
 4 MCP Servers: Tasks · Calendar · Notes · Google Workspace (Docs/Drive/Gmail)
 """
 
@@ -34,6 +34,7 @@ from .tools.db_tools import (
     get_note_by_id,
     get_all_memories_as_context,
 )
+
 # MCP-compatible imports
 from .tools.mcp_wrapper import (
     save_tasks_mcp as save_tasks,
@@ -43,7 +44,12 @@ from .tools.mcp_wrapper import (
     create_calendar_event_mcp as create_calendar_event,
 )
 from .tools.calendar_tools import get_available_slots
-from .tools.task_tools import list_my_tasks, mark_task_done, mark_task_in_progress, find_meeting_by_title
+from .tools.task_tools import (
+    list_my_tasks,
+    mark_task_done,
+    mark_task_in_progress,
+    find_meeting_by_title,
+)
 from .tools.notes_tools import search_related_notes, save_meeting_note
 from .tools.date_helpers import parse_relative_date
 from .tools.db_tools import (
@@ -78,7 +84,6 @@ load_dotenv()
 model_name = os.getenv("MODEL", "gemini-2.5-flash")
 
 
-
 # Centralized state defaults (Issue 7 fix)
 _STATE_DEFAULTS = {
     "TRANSCRIPT": "",
@@ -98,7 +103,7 @@ _STATE_DEFAULTS = {
     "save_schedule_result": "",
     "analysis_status": "",
     "final_briefing": "",
-    "memory_context": ""
+    "memory_context": "",
 }
 
 
@@ -107,7 +112,6 @@ def _ensure_state_defaults(tool_context: ToolContext) -> None:
     for key, default_value in _STATE_DEFAULTS.items():
         if key not in tool_context.state:
             tool_context.state[key] = default_value
-
 
 
 def save_transcript_to_state(tool_context: ToolContext, transcript: str) -> dict:
@@ -121,6 +125,7 @@ def save_transcript_to_state(tool_context: ToolContext, transcript: str) -> dict
         dict confirming the transcript was saved and prompting delegation.
     """
     import uuid
+
     _ensure_state_defaults(tool_context)
 
     # ADD REQUEST TRACKING for observability
@@ -137,7 +142,7 @@ def save_transcript_to_state(tool_context: ToolContext, transcript: str) -> dict
         "status": "success",
         "message": "Transcript saved. Delegating to pipeline now (do not wait for user input).",
         "length": len(transcript),
-        "next_action": "IMMEDIATE_DELEGATION_REQUIRED"
+        "next_action": "IMMEDIATE_DELEGATION_REQUIRED",
     }
 
 
@@ -201,14 +206,12 @@ def assemble_briefing_from_state(tool_context: ToolContext) -> str:
     Returns:
         Formatted markdown string starting with ✅ **Meeting Processed Successfully**.
     """
-    state   = tool_context.state
+    state = tool_context.state
     summary = (state.get("meeting_summary") or "").strip()
-    tasks   = (state.get("prioritized_tasks") or "").strip()
+    tasks = (state.get("prioritized_tasks") or "").strip()
     # save_and_schedule_agent uses lowercase key; guard against both casings
     save_result = (
-        state.get("save_schedule_result") or
-        state.get("SAVE_SCHEDULE_RESULT") or
-        ""
+        state.get("save_schedule_result") or state.get("SAVE_SCHEDULE_RESULT") or ""
     ).strip()
 
     briefing = (
@@ -222,7 +225,7 @@ def assemble_briefing_from_state(tool_context: ToolContext) -> str:
         "• Notes saved to knowledge base\n\n"
         "📊 **Pipeline:** 3 stages · Notes ∥ Quality Eval · Tasks + Calendar + Google Workspace MCP\n\n"
         "---\n"
-        "✨ **Try:** \"What tasks are pending?\" · \"Create a doc for this meeting\" · \"Mark [task] as done\""
+        '✨ **Try:** "What tasks are pending?" · "Create a doc for this meeting" · "Mark [task] as done"'
     )
     tool_context.state["final_briefing"] = briefing
     return briefing
@@ -238,13 +241,32 @@ def store_memory_direct(tool_context: ToolContext) -> str:
         Human-readable confirmation string.
     """
     import re as _re
+
     info = (tool_context.state.get("memory_input") or "").strip()
     if not info:
         return "⚠️ Nothing to remember — no information was provided."
 
     # Build a readable snake_case key from the first 4 meaningful words
-    _skip = {"i", "a", "an", "the", "to", "that", "this", "is", "are", "was",
-             "remember", "note", "keep", "please", "in", "mind", "store", "save"}
+    _skip = {
+        "i",
+        "a",
+        "an",
+        "the",
+        "to",
+        "that",
+        "this",
+        "is",
+        "are",
+        "was",
+        "remember",
+        "note",
+        "keep",
+        "please",
+        "in",
+        "mind",
+        "store",
+        "save",
+    }
     words = _re.sub(r"[^a-zA-Z0-9 ]", "", info).split()
     key_words = [w.lower() for w in words if w.lower() not in _skip][:4]
     key = ("_".join(key_words) or "user_preference")[:60]
@@ -319,7 +341,7 @@ TASK 3 — Call save_full_analysis with:
 Call save_full_analysis ONCE with all three parameters. Do not call it multiple times.
 """,
     tools=[save_full_analysis],
-    output_key="analysis_status"
+    output_key="analysis_status",
 )
 
 action_item_priority_agent = Agent(
@@ -353,7 +375,7 @@ If no tasks found, output: "No action items identified"
 
 Output ONLY the task list. NO headers, NO extra formatting, just the bullet list.
 """,
-    output_key="prioritized_tasks"
+    output_key="prioritized_tasks",
 )
 
 
@@ -391,7 +413,7 @@ If nothing to schedule, skip Task 2 entirely.
 Output a brief confirmation: how many tasks saved, how many calendar events created.
 """,
     tools=[save_tasks, parse_relative_date, create_calendar_event],
-    output_key="save_schedule_result"
+    output_key="save_schedule_result",
 )
 
 notes_agent = Agent(
@@ -413,7 +435,7 @@ Output ONLY the return value of that call verbatim — no other text, no JSON, n
 The returned text starts with ✅ **Meeting Processed Successfully** — relay it exactly as-is.
 """,
     tools=[save_meeting_note, assemble_briefing_from_state],
-    output_key="final_briefing"
+    output_key="final_briefing",
 )
 
 memory_agent_background = Agent(
@@ -446,12 +468,14 @@ After saving, return:
 }
 """,
     tools=[save_memory],
-    output_key="memory_result"
+    output_key="memory_result",
 )
 
 evaluation_agent = Agent(
     name="evaluation_agent",
-    model=model_name,
+    model=os.getenv(
+        "EVAL_MODEL", "gemini-2.5-flash-lite"
+    ),  # lighter model → separate quota pool, safe for parallel
     description="LLM-as-Judge: auto-grades meeting processing quality on 4 dimensions and saves score to DB.",
     instruction="""
 You are an AI quality evaluator (LLM-as-Judge). Grade this meeting processing run on 4 dimensions.
@@ -486,7 +510,7 @@ Then call save_quality_score with the meeting_id from state and the scores.
 The meeting_id is in state as current_meeting_id: {current_meeting_id}
 """,
     tools=[save_quality_score],
-    output_key="evaluation_result"
+    output_key="evaluation_result",
 )
 
 briefing_agent = Agent(
@@ -520,7 +544,7 @@ Output ONLY this format, starting with ✅ on the very first line:
 Rules: no JSON, no code blocks. Output must start with ✅ **Meeting Processed Successfully**.
 """,
     tools=[],
-    output_key="final_briefing"
+    output_key="final_briefing",
 )
 
 
@@ -531,7 +555,7 @@ query_agent = Agent(
     model=model_name,
     description="Answers questions about past meetings, tasks, notes, and stored memory.",
     instruction="""
-You are a helpful knowledge retrieval assistant for MeetingMind.
+You are a helpful knowledge retrieval assistant for Catalyst.
 
 The user has asked a question. Use your tools to find the answer.
 
@@ -636,7 +660,7 @@ Use these tools for analytics questions:
 "Weekly trends" / "Task completion over time" → get_task_completion_trends()
 "How many meetings per week?" / "Meeting velocity?" → get_meeting_velocity()
 "What's overdue?" / "Overdue tasks?" / "Follow-up report" → get_overdue_tasks(), then format as follow-up report (see below)
-"Quality scores" / "How well did MeetingMind process?" → get_latest_quality_scores()
+"Quality scores" / "How well did Catalyst process?" → get_latest_quality_scores()
 
 Format analytics results clearly with emoji headers and tables where appropriate.
 
@@ -702,14 +726,27 @@ Format your response in a readable way.
 If you can't find the information, say so clearly.
 """,
     tools=[
-        list_my_tasks, list_all_meetings, find_meeting_by_title,
-        get_meeting_summary, search_related_notes, get_note_by_id, get_memory,
-        semantic_search_tasks, semantic_search_notes, semantic_search_memory,
-        get_task_ownership_stats, get_recurring_topics, get_task_completion_trends,
-        get_meeting_velocity, get_overdue_tasks, get_latest_quality_scores,
-        search_gdrive, create_meeting_doc, send_meeting_summary_email,
+        list_my_tasks,
+        list_all_meetings,
+        find_meeting_by_title,
+        get_meeting_summary,
+        search_related_notes,
+        get_note_by_id,
+        get_memory,
+        semantic_search_tasks,
+        semantic_search_notes,
+        semantic_search_memory,
+        get_task_ownership_stats,
+        get_recurring_topics,
+        get_task_completion_trends,
+        get_meeting_velocity,
+        get_overdue_tasks,
+        get_latest_quality_scores,
+        search_gdrive,
+        create_meeting_doc,
+        send_meeting_summary_email,
     ],
-    output_key="query_result"
+    output_key="query_result",
 )
 
 execution_agent = Agent(
@@ -717,7 +754,7 @@ execution_agent = Agent(
     model=model_name,
     description="Executes action commands like marking tasks done, updating status, or scheduling.",
     instruction="""
-You are a task execution assistant for MeetingMind.
+You are a task execution assistant for Catalyst.
 
 The user wants to execute a command. Parse what they want and use the appropriate tool.
 
@@ -787,7 +824,7 @@ Examples:
     start_time="2026-04-10 14:00",
     duration_minutes=60,
     attendees="john@example.com",
-    description="Scheduled via MeetingMind"
+    description="Scheduled via Catalyst"
   )
 
 CRITICAL for calendar event creation:
@@ -915,7 +952,7 @@ THE MARKDOWN LINK MUST APPEAR EXACTLY AS THE TOOL RETURNS IT!
         save_note,
         # get_memory intentionally removed — preferences pre-loaded into {memory_context}
     ],
-    output_key="execution_result"
+    output_key="execution_result",
 )
 
 memory_store_agent = Agent(
@@ -947,7 +984,7 @@ After saving, respond with a clean, user-friendly confirmation.
 Keep it simple and conversational.
 """,
     tools=[save_memory],
-    output_key="memory_store_result"
+    output_key="memory_store_result",
 )
 
 
@@ -978,9 +1015,9 @@ Keep it simple and conversational.
 # Sequential pipeline — reliable under Vertex AI quota limits.
 # The parallel agents above demonstrate the intended architecture.
 # Stage 3: notes_agent + evaluation_agent run in PARALLEL
-# - notes_agent:      save note → assemble briefing (Python tool) → returns in ~3s
-# - evaluation_agent: LLM-as-Judge grades quality → saves score to DB → returns in ~6s
-# Total pipeline time = max(notes, eval) NOT sum — zero extra latency on the briefing
+# - notes_agent:      save note → assemble briefing (Python tools) → ~3s
+# - evaluation_agent: LLM-as-Judge on gemini-2.5-flash-lite (separate quota) → ~5s
+# Different models = separate Vertex AI quota buckets → no 429 collision
 parallel_notes_eval = ParallelAgent(
     name="parallel_notes_eval",
     description="Runs notes saving + LLM-as-Judge quality evaluation simultaneously.",
@@ -989,12 +1026,12 @@ parallel_notes_eval = ParallelAgent(
 
 transcript_pipeline = SequentialAgent(
     name="transcript_pipeline",
-    description="4-agent pipeline: analysis → save+schedule → (notes ∥ evaluation)",
+    description="3-stage pipeline: analysis → save+schedule → (notes ∥ evaluation)",
     sub_agents=[
-        analysis_agent,           # LLM call 1: summarise + extract tasks + save meeting to DB
+        analysis_agent,  # LLM call 1: summarise + extract tasks + save meeting to DB
         save_and_schedule_agent,  # LLM call 2: save tasks to DB + create calendar events
-        parallel_notes_eval,      # LLM call 3a (notes) ∥ 3b (eval) — run simultaneously
-    ]
+        parallel_notes_eval,  # LLM call 3a (notes/flash) ∥ 3b (eval/flash-lite) — parallel
+    ],
 )
 
 
@@ -1003,11 +1040,11 @@ transcript_pipeline = SequentialAgent(
 root_agent = Agent(
     name="meetingmind",
     model=model_name,
-    description="MeetingMind — AI Meeting Assistant | Paste transcripts to extract tasks, schedule events & create Google Docs | 10 agents · 4 MCP servers · pgvector semantic search",
+    description="Catalyst — Raw meetings. Structured action. | Paste transcripts to extract tasks, schedule events & create Google Docs | 8 agents · 4 MCP servers · pgvector semantic search",
     instruction="""
-You are MeetingMind, an intelligent multi-agent productivity assistant
-built on Google Cloud. You help teams manage meetings, tasks, schedules,
-and information through natural conversation.
+You are Catalyst, an intelligent multi-agent productivity assistant
+built on Google Cloud. You help teams turn raw meeting transcripts into
+structured action — tasks, calendar events, searchable notes, and Google Docs.
 
 CRITICAL: If the user's FIRST message is a greeting ("hi", "hello", "hey") or asks "what can you do",
 respond with the welcome message explaining your capabilities BEFORE they paste a transcript.
@@ -1103,7 +1140,8 @@ GENERAL BEHAVIOR:
 ═══════════════════════════════════════════
 - When user says "hello", "hi", or asks "what can you do", respond with:
 
-👋 **Welcome to MeetingMind!**
+⚡ **Welcome to Catalyst!**
+*Raw meetings. Structured action.*
 
 I'm an AI productivity assistant powered by **8 specialized agents** and **4 MCP servers** working together.
 
@@ -1141,14 +1179,14 @@ I'm an AI productivity assistant powered by **8 specialized agents** and **4 MCP
         set_user_query,
         set_user_command,
         set_memory_input,
-        store_memory_direct,       # handles INTENT D inline — no extra LLM call
+        store_memory_direct,  # handles INTENT D inline — no extra LLM call
     ],
     sub_agents=[
         transcript_pipeline,
         query_agent,
         execution_agent,
         # memory_store_agent removed — root_agent calls store_memory_direct() directly
-    ]
+    ],
 )
 
 # Export agent with correct name for ADK

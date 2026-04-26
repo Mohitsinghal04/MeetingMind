@@ -22,7 +22,10 @@ logging.info("🔧 MCP Integration Layer initialized (calls routed through MCP-c
 
 # MCP-COMPATIBLE TASK OPERATIONS
 
-def save_tasks_mcp(tool_context: ToolContext, tasks_json: str, skip_duplicate_check: bool = False) -> dict:
+
+def save_tasks_mcp(
+    tool_context: ToolContext, tasks_json: str, skip_duplicate_check: bool = False
+) -> dict:
     """Save tasks via MCP-compatible interface with duplicate checking.
 
     Architecture: ADK Agent → MCP Wrapper → Database
@@ -42,9 +45,11 @@ def save_tasks_mcp(tool_context: ToolContext, tasks_json: str, skip_duplicate_ch
     result["mcp_layer"] = "MCP-compatible interface"
     result["architecture"] = "Agent → MCP Wrapper → PostgreSQL"
 
-    tasks_saved = result.get('tasks_saved', 0)
-    tasks_skipped = result.get('tasks_skipped', 0)
-    logging.info(f"✅ [MCP Layer] save_tasks completed → {tasks_saved} saved, {tasks_skipped} duplicates skipped")
+    tasks_saved = result.get("tasks_saved", 0)
+    tasks_skipped = result.get("tasks_skipped", 0)
+    logging.info(
+        f"✅ [MCP Layer] save_tasks completed → {tasks_saved} saved, {tasks_skipped} duplicates skipped"
+    )
     return result
 
 
@@ -53,10 +58,12 @@ def get_tasks_mcp(
     owner: Optional[str] = None,
     priority: Optional[str] = None,
     status: Optional[str] = None,
-    meeting_id: Optional[str] = None
+    meeting_id: Optional[str] = None,
 ) -> dict:
     """Get tasks via MCP-compatible interface."""
-    logging.info(f"🔧 [MCP Layer] get_tasks called → filters: owner={owner}, priority={priority}, status={status}")
+    logging.info(
+        f"🔧 [MCP Layer] get_tasks called → filters: owner={owner}, priority={priority}, status={status}"
+    )
 
     result = db_get_pending_tasks(tool_context, owner, priority, status, meeting_id)
     result["mcp_layer"] = "MCP-compatible interface"
@@ -66,11 +73,7 @@ def get_tasks_mcp(
     return result
 
 
-def update_task_status_mcp(
-    tool_context: ToolContext,
-    task_name: str,
-    new_status: str
-) -> dict:
+def update_task_status_mcp(tool_context: ToolContext, task_name: str, new_status: str) -> dict:
     """Update task status via MCP-compatible interface."""
     logging.info(f"🔧 [MCP Layer] update_task_status called → {task_name} to {new_status}")
 
@@ -83,6 +86,7 @@ def update_task_status_mcp(
 
 
 # MCP-COMPATIBLE NOTE OPERATIONS
+
 
 def save_note_mcp(tool_context: ToolContext, title: str, content: str) -> dict:
     """Save note via MCP-compatible interface."""
@@ -110,18 +114,21 @@ def search_notes_mcp(tool_context: ToolContext, query: str) -> dict:
 
 # MCP-COMPATIBLE CALENDAR OPERATIONS
 
+
 def create_calendar_event_mcp(
     tool_context: ToolContext,
     title: str,
     start_time: str,
     duration_minutes: int = 60,
     attendees: str = "",
-    description: str = ""
+    description: str = "",
 ) -> dict:
     """Create calendar event via MCP-compatible interface."""
     logging.info(f"🔧 [MCP Layer] create_calendar_event called → {title} at {start_time}")
 
-    result = calendar_create_event(tool_context, title, start_time, duration_minutes, attendees, description)
+    result = calendar_create_event(
+        tool_context, title, start_time, duration_minutes, attendees, description
+    )
     result["mcp_layer"] = "MCP-compatible interface"
     result["architecture"] = "Agent → MCP Wrapper → Google Calendar API"
 
@@ -135,5 +142,5 @@ __all__ = [
     "update_task_status_mcp",
     "save_note_mcp",
     "search_notes_mcp",
-    "create_calendar_event_mcp"
+    "create_calendar_event_mcp",
 ]

@@ -9,7 +9,9 @@ from typing import Optional
 from google.adk.tools.tool_context import ToolContext
 
 
-def parse_relative_date(tool_context: ToolContext, date_string: str, reference_date: Optional[str] = None) -> dict:
+def parse_relative_date(
+    tool_context: ToolContext, date_string: str, reference_date: Optional[str] = None
+) -> dict:
     """Parse relative date strings like 'Monday', 'tomorrow', 'next week' into absolute YYYY-MM-DD format.
 
     Args:
@@ -35,7 +37,7 @@ def parse_relative_date(tool_context: ToolContext, date_string: str, reference_d
                 "status": "success",
                 "date": target.strftime("%Y-%m-%d"),
                 "day_of_week": target.strftime("%A"),
-                "formatted": target.strftime("%B %d, %Y")
+                "formatted": target.strftime("%B %d, %Y"),
             }
 
         # Handle "today"
@@ -44,7 +46,7 @@ def parse_relative_date(tool_context: ToolContext, date_string: str, reference_d
                 "status": "success",
                 "date": ref.strftime("%Y-%m-%d"),
                 "day_of_week": ref.strftime("%A"),
-                "formatted": ref.strftime("%B %d, %Y")
+                "formatted": ref.strftime("%B %d, %Y"),
             }
 
         # Handle "next week"
@@ -54,18 +56,28 @@ def parse_relative_date(tool_context: ToolContext, date_string: str, reference_d
                 "status": "success",
                 "date": target.strftime("%Y-%m-%d"),
                 "day_of_week": target.strftime("%A"),
-                "formatted": target.strftime("%B %d, %Y")
+                "formatted": target.strftime("%B %d, %Y"),
             }
 
         # Handle day of week names (Monday, Tuesday, etc.)
         weekdays = {
-            "monday": 0, "mon": 0,
-            "tuesday": 1, "tue": 1, "tues": 1,
-            "wednesday": 2, "wed": 2,
-            "thursday": 3, "thu": 3, "thur": 3, "thurs": 3,
-            "friday": 4, "fri": 4,
-            "saturday": 5, "sat": 5,
-            "sunday": 6, "sun": 6
+            "monday": 0,
+            "mon": 0,
+            "tuesday": 1,
+            "tue": 1,
+            "tues": 1,
+            "wednesday": 2,
+            "wed": 2,
+            "thursday": 3,
+            "thu": 3,
+            "thur": 3,
+            "thurs": 3,
+            "friday": 4,
+            "fri": 4,
+            "saturday": 5,
+            "sat": 5,
+            "sunday": 6,
+            "sun": 6,
         }
 
         # Remove "next" and "this" prefixes
@@ -82,13 +94,15 @@ def parse_relative_date(tool_context: ToolContext, date_string: str, reference_d
 
             target = ref + timedelta(days=days_ahead)
 
-            logging.info(f"📅 Date calculation: '{date_string}' → {target.strftime('%A, %B %d, %Y')}")
+            logging.info(
+                f"📅 Date calculation: '{date_string}' → {target.strftime('%A, %B %d, %Y')}"
+            )
 
             return {
                 "status": "success",
                 "date": target.strftime("%Y-%m-%d"),
                 "day_of_week": target.strftime("%A"),
-                "formatted": target.strftime("%B %d, %Y")
+                "formatted": target.strftime("%B %d, %Y"),
             }
 
         # Handle month names (e.g., "April 10th", "April 10")
@@ -107,7 +121,7 @@ def parse_relative_date(tool_context: ToolContext, date_string: str, reference_d
                         "status": "success",
                         "date": target.strftime("%Y-%m-%d"),
                         "day_of_week": target.strftime("%A"),
-                        "formatted": target.strftime("%B %d, %Y")
+                        "formatted": target.strftime("%B %d, %Y"),
                     }
                 except ValueError:
                     continue
@@ -117,7 +131,7 @@ def parse_relative_date(tool_context: ToolContext, date_string: str, reference_d
         # If we get here, couldn't parse
         return {
             "status": "error",
-            "message": f"Could not parse date: '{date_string}'. Try formats like 'Monday', 'tomorrow', 'April 10th'"
+            "message": f"Could not parse date: '{date_string}'. Try formats like 'Monday', 'tomorrow', 'April 10th'",
         }
 
     except Exception as e:

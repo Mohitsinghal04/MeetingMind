@@ -21,9 +21,7 @@ class MCPClientManager:
         """Initialize connection to Calendar MCP server."""
         try:
             server_params = StdioServerParameters(
-                command="python",
-                args=["-m", "tools.calendar_mcp_server"],
-                env=None
+                command="python", args=["-m", "tools.calendar_mcp_server"], env=None
             )
 
             read, write = await stdio_client(server_params)
@@ -33,10 +31,12 @@ class MCPClientManager:
             # List available tools from server
             tools_result = await session.list_tools()
 
-            self.sessions['calendar'] = session
-            self.tools['calendar'] = tools_result.tools if hasattr(tools_result, 'tools') else []
+            self.sessions["calendar"] = session
+            self.tools["calendar"] = tools_result.tools if hasattr(tools_result, "tools") else []
 
-            logging.info(f"Calendar MCP client initialized with {len(self.tools['calendar'])} tools")
+            logging.info(
+                f"Calendar MCP client initialized with {len(self.tools['calendar'])} tools"
+            )
             return session
 
         except Exception as e:
@@ -47,9 +47,7 @@ class MCPClientManager:
         """Initialize connection to Tasks MCP server."""
         try:
             server_params = StdioServerParameters(
-                command="python",
-                args=["-m", "tools.tasks_mcp_server"],
-                env=None
+                command="python", args=["-m", "tools.tasks_mcp_server"], env=None
             )
 
             read, write = await stdio_client(server_params)
@@ -58,8 +56,8 @@ class MCPClientManager:
 
             tools_result = await session.list_tools()
 
-            self.sessions['tasks'] = session
-            self.tools['tasks'] = tools_result.tools if hasattr(tools_result, 'tools') else []
+            self.sessions["tasks"] = session
+            self.tools["tasks"] = tools_result.tools if hasattr(tools_result, "tools") else []
 
             logging.info(f"Tasks MCP client initialized with {len(self.tools['tasks'])} tools")
             return session
@@ -72,9 +70,7 @@ class MCPClientManager:
         """Initialize connection to Notes MCP server."""
         try:
             server_params = StdioServerParameters(
-                command="python",
-                args=["-m", "tools.notes_mcp_server"],
-                env=None
+                command="python", args=["-m", "tools.notes_mcp_server"], env=None
             )
 
             read, write = await stdio_client(server_params)
@@ -83,8 +79,8 @@ class MCPClientManager:
 
             tools_result = await session.list_tools()
 
-            self.sessions['notes'] = session
-            self.tools['notes'] = tools_result.tools if hasattr(tools_result, 'tools') else []
+            self.sessions["notes"] = session
+            self.tools["notes"] = tools_result.tools if hasattr(tools_result, "tools") else []
 
             logging.info(f"Notes MCP client initialized with {len(self.tools['notes'])} tools")
             return session
@@ -99,7 +95,7 @@ class MCPClientManager:
             self.initialize_calendar_client(),
             self.initialize_tasks_client(),
             self.initialize_notes_client(),
-            return_exceptions=True
+            return_exceptions=True,
         )
 
         success_count = sum(1 for r in results if r is not None and not isinstance(r, Exception))
@@ -146,16 +142,16 @@ async def get_mcp_manager():
 async def call_calendar_tool(tool_name: str, arguments: Dict[str, Any]):
     """Helper to call a calendar MCP tool."""
     manager = await get_mcp_manager()
-    return await manager.call_tool('calendar', tool_name, arguments)
+    return await manager.call_tool("calendar", tool_name, arguments)
 
 
 async def call_tasks_tool(tool_name: str, arguments: Dict[str, Any]):
     """Helper to call a tasks MCP tool."""
     manager = await get_mcp_manager()
-    return await manager.call_tool('tasks', tool_name, arguments)
+    return await manager.call_tool("tasks", tool_name, arguments)
 
 
 async def call_notes_tool(tool_name: str, arguments: Dict[str, Any]):
     """Helper to call a notes MCP tool."""
     manager = await get_mcp_manager()
-    return await manager.call_tool('notes', tool_name, arguments)
+    return await manager.call_tool("notes", tool_name, arguments)

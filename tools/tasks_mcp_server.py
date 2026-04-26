@@ -29,20 +29,20 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "owner": {
                         "type": "string",
-                        "description": "Filter by task owner name (partial match)"
+                        "description": "Filter by task owner name (partial match)",
                     },
                     "priority": {
                         "type": "string",
                         "enum": ["High", "Medium", "Low"],
-                        "description": "Filter by priority level"
+                        "description": "Filter by priority level",
                     },
                     "status": {
                         "type": "string",
                         "enum": ["Pending", "In Progress", "Done", "Cancelled"],
-                        "description": "Filter by status"
-                    }
-                }
-            }
+                        "description": "Filter by status",
+                    },
+                },
+            },
         ),
         Tool(
             name="save_tasks",
@@ -52,15 +52,15 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "tasks_json": {
                         "type": "string",
-                        "description": "JSON string array of tasks with task, owner, deadline, priority fields"
+                        "description": "JSON string array of tasks with task, owner, deadline, priority fields",
                     },
                     "meeting_id": {
                         "type": "string",
-                        "description": "Optional meeting ID to associate tasks with"
-                    }
+                        "description": "Optional meeting ID to associate tasks with",
+                    },
                 },
-                "required": ["tasks_json"]
-            }
+                "required": ["tasks_json"],
+            },
         ),
         Tool(
             name="update_task_status",
@@ -70,16 +70,16 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "task_name": {
                         "type": "string",
-                        "description": "Partial or full name of the task to update"
+                        "description": "Partial or full name of the task to update",
                     },
                     "new_status": {
                         "type": "string",
                         "enum": ["Pending", "In Progress", "Done", "Cancelled"],
-                        "description": "New status value"
-                    }
+                        "description": "New status value",
+                    },
                 },
-                "required": ["task_name", "new_status"]
-            }
+                "required": ["task_name", "new_status"],
+            },
         ),
         Tool(
             name="check_duplicate_tasks",
@@ -89,12 +89,12 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "task_name": {
                         "type": "string",
-                        "description": "The task name to check for duplicates"
+                        "description": "The task name to check for duplicates",
                     }
                 },
-                "required": ["task_name"]
-            }
-        )
+                "required": ["task_name"],
+            },
+        ),
     ]
 
 
@@ -103,19 +103,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     """Handle tool calls by wrapping REAL DB operations."""
 
     # Import DB functions dynamically to avoid circular imports
-    from .db_tools import (
-        get_pending_tasks,
-        save_tasks,
-        update_task_status,
-        check_duplicate_tasks
-    )
+    from .db_tools import get_pending_tasks, save_tasks, update_task_status, check_duplicate_tasks
 
     # Create a mock ToolContext for DB functions (they need it)
     class MockToolContext:
         def __init__(self):
             self.state = {
                 "session_id": "mcp_session",
-                "current_meeting_id": arguments.get("meeting_id")
+                "current_meeting_id": arguments.get("meeting_id"),
             }
 
     tool_context = MockToolContext()
@@ -132,10 +127,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         logging.info(f"🔧 MCP Tasks: list_tasks called → {result.get('count', 0)} tasks returned")
 
-        return [TextContent(
-            type="text",
-            text=str(result)
-        )]
+        return [TextContent(type="text", text=str(result))]
 
     elif name == "save_tasks":
         tasks_json = arguments.get("tasks_json")
@@ -145,12 +137,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         result = save_tasks(tool_context, tasks_json)
         result["source"] = "MCP Tasks Server → PostgreSQL"
 
-        logging.info(f"🔧 MCP Tasks: save_tasks called → {result.get('tasks_saved', 0)} tasks saved")
+        logging.info(
+            f"🔧 MCP Tasks: save_tasks called → {result.get('tasks_saved', 0)} tasks saved"
+        )
 
-        return [TextContent(
-            type="text",
-            text=str(result)
-        )]
+        return [TextContent(type="text", text=str(result))]
 
     elif name == "update_task_status":
         task_name = arguments.get("task_name")
@@ -162,10 +153,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         logging.info(f"🔧 MCP Tasks: update_task_status called → {task_name} to {new_status}")
 
-        return [TextContent(
-            type="text",
-            text=str(result)
-        )]
+        return [TextContent(type="text", text=str(result))]
 
     elif name == "check_duplicate_tasks":
         task_name = arguments.get("task_name")
@@ -174,12 +162,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         result = check_duplicate_tasks(tool_context, task_name)
         result["source"] = "MCP Tasks Server → PostgreSQL"
 
-        logging.info(f"🔧 MCP Tasks: check_duplicate_tasks called → is_duplicate={result.get('is_duplicate', False)}")
+        logging.info(
+            f"🔧 MCP Tasks: check_duplicate_tasks called → is_duplicate={result.get('is_duplicate', False)}"
+        )
 
-        return [TextContent(
-            type="text",
-            text=str(result)
-        )]
+        return [TextContent(type="text", text=str(result))]
 
     else:
         raise ValueError(f"Unknown tool: {name}")
@@ -188,11 +175,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 async def main():
     """Run the MCP server."""
     async with stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            server.create_initialization_options()
-        )
+        await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
 if __name__ == "__main__":

@@ -27,9 +27,12 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "title":          {"type": "string", "description": "Document title (meeting name)"},
-                    "summary":        {"type": "string", "description": "Full meeting summary"},
-                    "tasks_markdown": {"type": "string", "description": "Action items as markdown text"},
+                    "title": {"type": "string", "description": "Document title (meeting name)"},
+                    "summary": {"type": "string", "description": "Full meeting summary"},
+                    "tasks_markdown": {
+                        "type": "string",
+                        "description": "Action items as markdown text",
+                    },
                 },
                 "required": ["title", "summary"],
             },
@@ -57,7 +60,7 @@ async def list_tools() -> list[Tool]:
                         "description": "List of recipient email addresses",
                     },
                     "subject": {"type": "string", "description": "Email subject"},
-                    "body":    {"type": "string", "description": "Email body (HTML or plain text)"},
+                    "body": {"type": "string", "description": "Email body (HTML or plain text)"},
                 },
                 "required": ["to_emails", "subject", "body"],
             },

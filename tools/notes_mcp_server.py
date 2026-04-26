@@ -25,13 +25,10 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search keyword or phrase"
-                    }
+                    "query": {"type": "string", "description": "Search keyword or phrase"}
                 },
-                "required": ["query"]
-            }
+                "required": ["query"],
+            },
         ),
         Tool(
             name="save_note",
@@ -39,21 +36,15 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "title": {
-                        "type": "string",
-                        "description": "Short title for the note"
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "Full note content"
-                    },
+                    "title": {"type": "string", "description": "Short title for the note"},
+                    "content": {"type": "string", "description": "Full note content"},
                     "meeting_id": {
                         "type": "string",
-                        "description": "Optional meeting ID to associate with"
-                    }
+                        "description": "Optional meeting ID to associate with",
+                    },
                 },
-                "required": ["title", "content"]
-            }
+                "required": ["title", "content"],
+            },
         ),
         Tool(
             name="search_related_notes",
@@ -63,11 +54,11 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Topic, keyword, or phrase to search for in notes"
+                        "description": "Topic, keyword, or phrase to search for in notes",
                     }
                 },
-                "required": ["query"]
-            }
+                "required": ["query"],
+            },
         ),
         Tool(
             name="save_meeting_note",
@@ -77,16 +68,16 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "title": {
                         "type": "string",
-                        "description": "A descriptive title for the note (e.g., 'Q3 Planning Meeting')"
+                        "description": "A descriptive title for the note (e.g., 'Q3 Planning Meeting')",
                     },
                     "content": {
                         "type": "string",
-                        "description": "The full content to save as a note"
-                    }
+                        "description": "The full content to save as a note",
+                    },
                 },
-                "required": ["title", "content"]
-            }
-        )
+                "required": ["title", "content"],
+            },
+        ),
     ]
 
 
@@ -101,7 +92,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         def __init__(self):
             self.state = {
                 "session_id": "mcp_session",
-                "current_meeting_id": arguments.get("meeting_id")
+                "current_meeting_id": arguments.get("meeting_id"),
             }
 
     tool_context = MockToolContext()
@@ -141,11 +132,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 async def main():
     """Run the MCP server."""
     async with stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            server.create_initialization_options()
-        )
+        await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
 if __name__ == "__main__":

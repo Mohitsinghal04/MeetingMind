@@ -11,7 +11,7 @@ from .db_tools import (
     get_meetings_with_task_counts,
     update_task_status,
     save_tasks,
-    check_duplicate_tasks
+    check_duplicate_tasks,
 )
 
 
@@ -21,7 +21,7 @@ def list_my_tasks(
     priority: Optional[str] = None,
     status: Optional[str] = None,
     meeting_id: Optional[str] = None,
-    force_show_all: bool = False
+    force_show_all: bool = False,
 ) -> dict:
     """List tasks, optionally filtered by owner, priority, status, or meeting.
 
@@ -37,11 +37,7 @@ def list_my_tasks(
         dict with list of matching tasks.
     """
     result = get_pending_tasks(
-        tool_context,
-        owner=owner,
-        priority=priority,
-        status=status,
-        meeting_id=meeting_id
+        tool_context, owner=owner, priority=priority, status=status, meeting_id=meeting_id
     )
 
     return _format_task_list(result)
@@ -56,15 +52,17 @@ def _format_task_list(result: dict) -> dict:
                 "status": "success",
                 "count": 0,
                 "tasks": [],
-                "message": "No tasks found matching your criteria."
+                "message": "No tasks found matching your criteria.",
             }
 
         # Format for readability
         summary_lines = []
         for t in tasks:
             # Extract meeting title from summary
-            meeting_summary = t.get('meeting_summary', '')
-            meeting_title = meeting_summary.split('.')[0][:50] if meeting_summary else 'Unknown Meeting'
+            meeting_summary = t.get("meeting_summary", "")
+            meeting_title = (
+                meeting_summary.split(".")[0][:50] if meeting_summary else "Unknown Meeting"
+            )
 
             summary_lines.append(
                 f"[{t.get('priority','?')}] {t.get('task_name','?')} "
@@ -76,7 +74,7 @@ def _format_task_list(result: dict) -> dict:
             "status": "success",
             "count": len(tasks),
             "tasks": tasks,
-            "summary": "\n".join(summary_lines)
+            "summary": "\n".join(summary_lines),
         }
 
     return result
@@ -132,7 +130,7 @@ def find_meeting_by_title(tool_context: ToolContext, meeting_title: str) -> dict
                    WHERE LOWER(summary) LIKE LOWER(%s)
                    ORDER BY created_at DESC
                    LIMIT 5""",
-                (f"%{meeting_title}%",)
+                (f"%{meeting_title}%",),
             )
             meetings = [dict(row) for row in cur.fetchall()]
             cur.close()
@@ -140,30 +138,36 @@ def find_meeting_by_title(tool_context: ToolContext, meeting_title: str) -> dict
         if not meetings:
             return {
                 "status": "not_found",
-                "message": f"No meeting found matching '{meeting_title}'"
+                "message": f"No meeting found matching '{meeting_title}'",
             }
 
         if len(meetings) == 1:
             return {
                 "status": "success",
-                "meeting_id": meetings[0]['id'],
-                "meeting_title": meetings[0]['summary'].split('.')[0][:80]
+                "meeting_id": meetings[0]["id"],
+                "meeting_title": meetings[0]["summary"].split(".")[0][:80],
             }
 
         # Multiple matches - return options
         options = []
         for m in meetings:
-            title = m['summary'].split('.')[0][:80]
-            options.append({
-                "meeting_id": m['id'],
-                "title": title,
-                "created_at": m['created_at'].isoformat() if hasattr(m['created_at'], 'isoformat') else str(m['created_at'])
-            })
+            title = m["summary"].split(".")[0][:80]
+            options.append(
+                {
+                    "meeting_id": m["id"],
+                    "title": title,
+                    "created_at": (
+                        m["created_at"].isoformat()
+                        if hasattr(m["created_at"], "isoformat")
+                        else str(m["created_at"])
+                    ),
+                }
+            )
 
         return {
             "status": "multiple_matches",
             "message": f"Found {len(meetings)} meetings matching '{meeting_title}'",
-            "options": options
+            "options": options,
         }
 
     except Exception as e:

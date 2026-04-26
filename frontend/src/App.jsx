@@ -223,7 +223,7 @@ Alex: I'll coordinate with PR for the launch announcement. We should aim for tec
 
 Sarah: Great. Let's reconvene next week with updates. Meeting adjourned.`
 
-const WELCOME = '👋 **Welcome to MeetingMind!**\n\nI\'m powered by **8 specialized agents** working together to process your meetings.\n\n**Try:**\n- Paste any meeting transcript (500+ chars)\n- "What tasks are pending?"\n- "Who has the most tasks?"\n- "What\'s overdue?"'
+const WELCOME = '⚡ **Welcome to Catalyst!**\n*Raw meetings. Structured action.*\n\nI\'m powered by **8 specialized agents** and **4 MCP servers** working together.\n\n**Try:**\n- Paste any meeting transcript (500+ chars)\n- "What tasks are pending?"\n- "Who has the most tasks?"\n- "What\'s overdue?"'
 
 const MESSAGES_KEY = 'mm_messages'
 
@@ -450,10 +450,10 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
 
       if (isProcessed) {
         onTranscriptProcessed?.()
-        // Fetch quality score — 2s wait for evaluation_agent, 1 retry at 4s, then give up
-        // No LLM calls — just a DB read each time
+        // Fetch quality score — evaluation_agent runs in parallel with notes_agent (~5-6s)
+        // No LLM calls — just a DB read each time. Retry at 3s and 6s, then give up silently.
         ;(async () => {
-          for (const delay of [2000, 4000]) {
+          for (const delay of [3000, 6000]) {
             await new Promise(r => setTimeout(r, delay))
             try {
               const q = await fetch('/api/quality').then(r => r.json())
@@ -489,7 +489,7 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
       {/* Header */}
       <div className="px-5 py-4 bg-gradient-to-r from-indigo-600 to-indigo-500 text-white flex items-center justify-between shrink-0">
         <div className="flex items-center gap-2.5">
-          <span className="text-lg font-bold tracking-tight">🧠 MeetingMind</span>
+          <span className="text-lg font-bold tracking-tight">⚡ Catalyst</span>
           <span className="text-xs bg-white/20 backdrop-blur px-2.5 py-0.5 rounded-full font-medium">8 Agents</span>
         </div>
         <div className="flex items-center gap-2">
@@ -500,7 +500,7 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
           >
             ▶ Try Demo
           </button>
-          <span className="text-xs text-indigo-200 font-medium">AI Meeting Intelligence</span>
+          <span className="text-xs text-indigo-200 font-medium">Raw meetings. Structured action.</span>
         </div>
       </div>
 
@@ -525,7 +525,7 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
             <div key={i} className={`flex flex-col min-w-0 ${m.role === 'user' ? 'items-end' : 'items-start'}`}>
               <div className={`flex min-w-0 w-full ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                 {m.role === 'assistant' && (
-                  <div className="w-7 h-7 rounded-full bg-indigo-100 flex items-center justify-center text-sm mr-2 mt-0.5 shrink-0">🧠</div>
+                  <div className="w-7 h-7 rounded-full bg-indigo-100 flex items-center justify-center text-sm mr-2 mt-0.5 shrink-0">⚡</div>
                 )}
                 <div className={`max-w-[85%] min-w-0 rounded-2xl px-4 py-3 text-sm leading-relaxed shadow-sm ${
                   m.role === 'user'
@@ -554,7 +554,7 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
 
         {loading && (
           <div className="flex justify-start items-start gap-2">
-            <div className="w-7 h-7 rounded-full bg-indigo-100 flex items-center justify-center text-sm shrink-0">🧠</div>
+            <div className="w-7 h-7 rounded-full bg-indigo-100 flex items-center justify-center text-sm shrink-0">⚡</div>
             <div className="bg-white border border-gray-100 rounded-2xl rounded-bl-none px-4 py-3 shadow-sm min-w-[260px]">
               <p className="text-xs text-gray-500 mb-3 flex items-center gap-1.5 font-medium">
                 <span className="animate-spin inline-block">⚙️</span>
@@ -790,7 +790,7 @@ function exportTasksCSV(tasks, label = 'all-tasks') {
   const url  = URL.createObjectURL(blob)
   const a    = document.createElement('a')
   a.href     = url
-  a.download = `meetingmind-${slug}-${date}.csv`
+  a.download = `catalyst-${slug}-${date}.csv`
   a.click()
   URL.revokeObjectURL(url)
 }
@@ -1007,7 +1007,7 @@ function TaskBoard({ refreshTrigger, ownerFilter, onClearOwner, statusFilter, on
           <div className="flex flex-col items-center justify-center h-48 text-center gap-2 px-8">
             <span className="text-4xl">📋</span>
             <p className="text-gray-500 font-medium text-sm">No tasks yet</p>
-            <p className="text-gray-400 text-xs">Paste a meeting transcript in the chat — MeetingMind will extract and prioritise action items automatically.</p>
+            <p className="text-gray-400 text-xs">Paste a meeting transcript in the chat — Catalyst will extract and prioritise action items automatically.</p>
           </div>
         ) : visible.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-32 text-center gap-2">
@@ -1257,7 +1257,7 @@ function MeetingsPanel() {
           <div className="flex flex-col items-center justify-center h-60 gap-3 px-8 text-center">
             <span className="text-4xl opacity-40">📋</span>
             <p className="text-gray-500 font-medium text-sm">No meetings yet</p>
-            <p className="text-gray-400 text-xs">Paste a meeting transcript in the chat. MeetingMind will summarise it, extract tasks, and save it here automatically.</p>
+            <p className="text-gray-400 text-xs">Paste a meeting transcript in the chat. Catalyst will summarise it, extract tasks, and save it here automatically.</p>
           </div>
         ) : filtered.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-60 gap-3 text-center">
@@ -1717,7 +1717,7 @@ function DocsPanel({ refreshTrigger }) {
     <div className="flex flex-col items-center justify-center h-60 text-gray-400 gap-3">
       <span className="text-4xl opacity-40">📄</span>
       <p className="text-sm font-medium">No documents yet</p>
-      <p className="text-xs text-center max-w-xs">After processing a transcript, MeetingMind automatically publishes a formatted document. It will appear here.</p>
+      <p className="text-xs text-center max-w-xs">After processing a transcript, Catalyst automatically publishes a formatted Google Doc. It will appear here.</p>
     </div>
   )
 

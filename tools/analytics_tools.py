@@ -10,14 +10,68 @@ from .db_tools import get_db_connection
 
 # Common English stopwords to filter from topic extraction
 _STOPWORDS = {
-    "the", "and", "for", "that", "this", "with", "will", "have", "from",
-    "they", "been", "were", "their", "about", "need", "also", "should",
-    "would", "could", "which", "there", "these", "those", "then", "than",
-    "when", "what", "where", "team", "meeting", "discussed", "action",
-    "items", "agenda", "update", "status", "review", "next", "steps",
-    "please", "make", "sure", "going", "forward", "agreed", "confirmed",
-    "noted", "point", "item", "following", "each", "into", "over", "some",
-    "said", "like", "just", "before", "after", "during", "all", "any",
+    "the",
+    "and",
+    "for",
+    "that",
+    "this",
+    "with",
+    "will",
+    "have",
+    "from",
+    "they",
+    "been",
+    "were",
+    "their",
+    "about",
+    "need",
+    "also",
+    "should",
+    "would",
+    "could",
+    "which",
+    "there",
+    "these",
+    "those",
+    "then",
+    "than",
+    "when",
+    "what",
+    "where",
+    "team",
+    "meeting",
+    "discussed",
+    "action",
+    "items",
+    "agenda",
+    "update",
+    "status",
+    "review",
+    "next",
+    "steps",
+    "please",
+    "make",
+    "sure",
+    "going",
+    "forward",
+    "agreed",
+    "confirmed",
+    "noted",
+    "point",
+    "item",
+    "following",
+    "each",
+    "into",
+    "over",
+    "some",
+    "said",
+    "like",
+    "just",
+    "before",
+    "after",
+    "during",
+    "all",
+    "any",
 }
 
 
@@ -30,7 +84,8 @@ def get_task_ownership_stats(tool_context: ToolContext) -> dict:
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT
                     owner,
                     COUNT(*)                                                      AS total_tasks,
@@ -42,7 +97,8 @@ def get_task_ownership_stats(tool_context: ToolContext) -> dict:
                 FROM tasks
                 GROUP BY owner
                 ORDER BY total_tasks DESC
-            """)
+            """
+            )
             rows = cur.fetchall()
             cur.close()
 
@@ -50,15 +106,17 @@ def get_task_ownership_stats(tool_context: ToolContext) -> dict:
         for row in rows:
             owner, total, done, pending, in_prog, high_open = row
             pct = round((done / total) * 100) if total > 0 else 0
-            owners.append({
-                "owner": owner,
-                "total_tasks": total,
-                "completed": done,
-                "pending": pending,
-                "in_progress": in_prog,
-                "high_priority_open": high_open,
-                "completion_pct": pct,
-            })
+            owners.append(
+                {
+                    "owner": owner,
+                    "total_tasks": total,
+                    "completed": done,
+                    "pending": pending,
+                    "in_progress": in_prog,
+                    "high_priority_open": high_open,
+                    "completion_pct": pct,
+                }
+            )
 
         return {"status": "success", "owners": owners, "count": len(owners)}
 
@@ -107,7 +165,8 @@ def get_task_completion_trends(tool_context: ToolContext) -> dict:
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT
                     DATE_TRUNC('week', created_at)::DATE                         AS week_start,
                     COUNT(*)                                                      AS tasks_created,
@@ -116,7 +175,8 @@ def get_task_completion_trends(tool_context: ToolContext) -> dict:
                 WHERE created_at >= NOW() - INTERVAL '8 weeks'
                 GROUP BY week_start
                 ORDER BY week_start ASC
-            """)
+            """
+            )
             rows = cur.fetchall()
             cur.close()
 
@@ -146,7 +206,8 @@ def get_meeting_velocity(tool_context: ToolContext) -> dict:
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT
                     COUNT(DISTINCT m.id)                                          AS total_meetings,
                     COUNT(t.id)                                                   AS total_tasks,
@@ -155,7 +216,8 @@ def get_meeting_velocity(tool_context: ToolContext) -> dict:
                               AND t.status NOT IN ('Done','Cancelled') THEN 1 ELSE 0 END) AS open_high_priority
                 FROM meetings m
                 LEFT JOIN tasks t ON t.meeting_id = m.id
-            """)
+            """
+            )
             row = cur.fetchone()
             cur.close()
 
@@ -187,7 +249,8 @@ def get_overdue_tasks(tool_context: ToolContext) -> dict:
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT
                     id,
                     task_name,
@@ -216,26 +279,31 @@ def get_overdue_tasks(tool_context: ToolContext) -> dict:
                 WHERE parsed_date IS NOT NULL
                   AND parsed_date < CURRENT_DATE
                 ORDER BY days_overdue DESC
-            """)
+            """
+            )
             rows = cur.fetchall()
             cur.close()
 
         tasks = [
             {
-                "id":         str(r[0]),
-                "task_name":  r[1],
-                "owner":      r[2],
-                "deadline":   r[3],
-                "priority":   r[4],
-                "status":     r[5],
+                "id": str(r[0]),
+                "task_name": r[1],
+                "owner": r[2],
+                "deadline": r[3],
+                "priority": r[4],
+                "status": r[5],
                 "days_overdue": int(r[6]),
             }
             for r in rows
         ]
 
         if not tasks:
-            return {"status": "success", "overdue_tasks": [], "count": 0,
-                    "message": "No overdue tasks found."}
+            return {
+                "status": "success",
+                "overdue_tasks": [],
+                "count": 0,
+                "message": "No overdue tasks found.",
+            }
 
         return {"status": "success", "overdue_tasks": tasks, "count": len(tasks)}
 
@@ -253,7 +321,8 @@ def get_latest_quality_scores(tool_context: ToolContext, limit: int = 5) -> dict
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT
                     qs.id,
                     qs.meeting_id,
@@ -270,7 +339,9 @@ def get_latest_quality_scores(tool_context: ToolContext, limit: int = 5) -> dict
                 LEFT JOIN meetings m ON m.id = qs.meeting_id
                 ORDER BY qs.created_at DESC
                 LIMIT %s
-            """, (limit,))
+            """,
+                (limit,),
+            )
             rows = cur.fetchall()
             cur.close()
 

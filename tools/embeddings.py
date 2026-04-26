@@ -13,10 +13,10 @@ _model_name_used = None
 
 # Try these models in order — first available wins
 _CANDIDATE_MODELS = [
-    "text-embedding-004",          # newest, 768-dim, widely available
-    "text-embedding-005",          # if available
-    "textembedding-gecko@003",     # older
-    "textembedding-gecko@001",     # fallback
+    "text-embedding-004",  # newest, 768-dim, widely available
+    "text-embedding-005",  # if available
+    "textembedding-gecko@003",  # older
+    "textembedding-gecko@001",  # fallback
 ]
 
 
@@ -29,7 +29,7 @@ def _get_model():
     from vertexai.language_models import TextEmbeddingModel
 
     project = os.getenv("PROJECT_ID")
-    region  = os.getenv("REGION", "us-central1")
+    region = os.getenv("REGION", "us-central1")
     vertexai.init(project=project, location=region)
 
     for name in _CANDIDATE_MODELS:

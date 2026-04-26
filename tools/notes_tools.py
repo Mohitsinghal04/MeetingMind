@@ -27,14 +27,14 @@ def search_related_notes(tool_context: ToolContext, query: str) -> dict:
                 "found": False,
                 "count": 0,
                 "notes": [],
-                "message": f"No notes found related to '{query}'"
+                "message": f"No notes found related to '{query}'",
             }
         logging.info(f"Found {result['count']} notes for query: '{query}'")
         return {
             "status": "success",
             "found": True,
             "count": result["count"],
-            "notes": result["notes"]
+            "notes": result["notes"],
         }
 
     return result
@@ -58,6 +58,6 @@ def save_meeting_note(tool_context: ToolContext, title: str, content: str) -> di
             "status": "success",
             "note_id": result["note_id"],
             "title": title,
-            "message": f"Note saved: '{title}'"
+            "message": f"Note saved: '{title}'",
         }
     return result

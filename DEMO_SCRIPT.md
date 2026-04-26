@@ -1,4 +1,4 @@
-# MeetingMind — Demo Script
+# Catalyst — Demo Script
 **Google Gen AI Academy APAC | Target: 5 minutes**
 
 ---
@@ -17,7 +17,7 @@
 ## Minute 1 — Hook + Architecture (60s)
 
 **Say:**
-> "MeetingMind turns any meeting transcript into structured action — in real time.
+> "Catalyst turns any meeting transcript into structured action — in real time.
 > Under the hood it runs **8 specialized AI agents** on Google ADK, with **4 MCP servers**
 > connecting to Google Calendar, Docs, Drive, and a PostgreSQL vector database.
 > Let me show you."
@@ -42,13 +42,13 @@
 > "Stage 2: **Save & Schedule Agent** writes each task to PostgreSQL and creates a
 > Google Calendar event for the design review meeting — that's our Calendar MCP server."
 
-> "Stage 3 is where it gets interesting — two agents run **in parallel**:
+> "Stage 3 is where it gets interesting — two agents run **in parallel** on different models:
 > the **Notes Agent** saves the meeting to our knowledge base and assembles the briefing,
-> while the **Evaluation Agent** — our LLM-as-Judge — grades the processing quality
-> on 4 dimensions simultaneously. Zero extra latency."
+> while the **Evaluation Agent** — our LLM-as-Judge on Gemini Flash Lite — grades the processing
+> quality on 4 dimensions simultaneously. Zero extra latency on the briefing."
 
 **When briefing appears:**
-> "Done. Summary, action items, system actions — all in under 15 seconds."
+> "Done. Summary, action items, system actions — all in under 20 seconds."
 
 **Point at quality scorecard when it appears:**
 > "And there's the quality score — our LLM-as-Judge rated its own output: summary quality,
@@ -134,7 +134,7 @@ find tasks similar to set up environment
 > - **33% fewer LLM calls** than initial design — we profiled and eliminated redundant calls
 > - Single Cloud Run URL, React frontend, FastAPI backend, PostgreSQL
 >
-> MeetingMind doesn't just process meetings — it learns from them."
+> Catalyst doesn't just process meetings — it learns from them."
 
 ---
 

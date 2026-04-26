@@ -41,6 +41,7 @@ def timed_operation(operation_name):
     Returns:
         Decorated function with timing instrumentation.
     """
+
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
@@ -54,5 +55,7 @@ def timed_operation(operation_name):
                 duration = time.time() - start
                 logging.error(f"❌ {operation_name} FAILED after {duration:.3f}s: {e}")
                 raise
+
         return wrapper
+
     return decorator

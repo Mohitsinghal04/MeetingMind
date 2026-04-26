@@ -1,472 +1,210 @@
-# MeetingMind 🧠
+# ⚡ Catalyst
+### *Raw meetings. Structured action.*
 
-**AI-Powered Meeting Assistant with Multi-Agent Architecture**
+> **Google Gen AI Academy APAC — Multi-Agent Systems with MCP Competition**  
+> Built by Mohit Singhal and Neha Lohia (Cold Start team) · Deployed on Google Cloud Run
 
-MeetingMind is an intelligent productivity assistant that processes meeting transcripts to extract action items, schedule events, and manage tasks. Built with Google Agent Development Kit (ADK) and Model Context Protocol (MCP) integration.
+## What It Does
 
-[![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![Google ADK](https://img.shields.io/badge/Google%20ADK-1.14.0-green.svg)](https://cloud.google.com/ai/agent-developer-kit)
-[![Tests](https://img.shields.io/badge/Tests-15%20Passed-brightgreen.svg)](tests/)
-[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+Catalyst turns any meeting transcript into structured action in under 20 seconds.
 
+Paste a transcript → **8 specialized AI agents** extract tasks, assign priorities, schedule calendar events, save searchable notes, publish a Google Doc, and grade their own output — all automatically.
 
-## ✨ Features
+**Live demo:** https://meetingmind-1046074361007.us-central1.run.app
 
-- **📝 Smart Meeting Processing** - Extract action items, priorities, and deadlines from transcripts
-- **📅 Intelligent Scheduling** - Create calendar events with natural language date parsing (IST timezone)
-- **🔍 Fuzzy Search** - Find tasks and meetings with partial keyword matching
-- **💾 Duplicate Prevention** - Automatically detects and skips duplicate tasks
-- **🤖 9 Specialized Agents** - Root orchestrator + 8 sub-agents for complex workflows
-- **🔌 MCP Integration** - 3 MCP servers with 10 tools (Tasks, Calendar, Notes)
-- **🗄️ PostgreSQL Backend** - Connection pooling, indexed queries, full CRUD operations
-- **🧪 Test Coverage** - 15 automated unit tests with pytest
+## Architecture — Why It's Different
 
-
-## 🚀 Quick Start
-
-### Prerequisites
-
-- Python 3.11+
-- Google Cloud account with billing enabled
-- PostgreSQL database
-- gcloud CLI installed
-
-### Option A: Automated Setup (Recommended)
-
-For a complete automated setup from scratch, use the fresh start script:
-
-```bash
-bash fresh_start.sh
-```
-
-This will:
-1. Clean up any existing GCP resources
-2. Set up GCP infrastructure (Cloud SQL, Service Account, etc.)
-3. Initialize database schema
-4. Deploy to Cloud Run
-
-**Total time:** ~15-20 minutes (mostly Cloud SQL creation)
-
----
-
-### Option B: Manual Setup
-
-### 1. Clone Repository
-
-```bash
-git clone https://github.com/yourusername/meetingmind.git
-cd meetingmind
-```
-
-### 2. Set Up Google Cloud
-
-**IMPORTANT:** Before running the setup script, edit `setup_gcp.sh` and change the default password on line 14:
-
-```bash
-export DB_PASSWORD="temp-pwd"    # ← CHANGE THIS to a secure password
-```
-
-Then run the setup:
-
-```bash
-# Run GCP setup script
-bash setup_gcp.sh
-
-# Enable required APIs (Calendar, Cloud Run, etc.)
-bash enable_calendar_api.sh
-```
-
-### 3. Configure Environment
-
-Create a `.env` file with your configuration:
-
-```bash
-# Google Cloud
-PROJECT_ID=your-gcp-project-id
-REGION=us-central1
-
-# Database
-DB_HOST=your-postgresql-host
-DB_NAME=meetingmind
-DB_USER=meetingmind_user
-DB_PASSWORD=your-secure-password
-DB_PORT=5432
-
-# Calendar
-CALENDAR_ID=your-email@gmail.com
-
-# Settings
-TIMEZONE=Asia/Kolkata
-MODEL=gemini-2.5-flash
-```
-
-### 4. Initialize Database
-
-```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Create database schema
-python init_db.py
-```
-
-### 5. Test Locally (Optional)
-
-```bash
-# Run unit tests
-pytest tests/ -v
-
-# Test database connection
-bash test_db_connection.sh
-```
-
-### 6. Deploy to Cloud Run
-
-```bash
-bash deploy.sh
-```
-
-The deployment script will:
-- Build Docker image
-- Push to Google Artifact Registry
-- Deploy to Cloud Run
-- Display the service URL
-
-
-## 📖 Usage
-
-### Process a Meeting Transcript
-
-Paste any meeting transcript (500+ characters):
+Most LLM apps call one model once. Catalyst runs a **coordinated multi-agent pipeline** where each agent owns exactly one responsibility.
 
 ```
-User: [Pastes Q3 Planning Meeting transcript]
-
-MeetingMind:
-✅ Meeting Processed Successfully
-
-📋 Summary: Q3 Planning Discussion covering mobile app launch...
-💼 Action Items: 5 tasks extracted (2 duplicates skipped)
-📅 Calendar Events: 2 meetings scheduled
+User Input
+    │
+    ▼
+Root Agent (Intent Router)
+    │
+    ├─► TRANSCRIPT ──► SequentialAgent: transcript_pipeline
+    │                       │
+    │                  Stage 1: analysis_agent
+    │                       │  Gemini 2.5 Flash · summarise + extract tasks + save meeting
+    │                       ▼
+    │                  Stage 2: save_and_schedule_agent
+    │                       │  Gemini 2.5 Flash · write tasks to DB + Google Calendar event
+    │                       ▼
+    │                  Stage 3: ParallelAgent (two models, separate quota pools)
+    │                       ├── notes_agent          [gemini-2.5-flash]
+    │                       │   save note → assemble briefing (~3s)
+    │                       └── evaluation_agent     [gemini-2.5-flash-lite]
+    │                           LLM-as-Judge: grade quality on 4 dimensions (~5s)
+    │
+    ├─► QUESTION ────► query_agent
+    │                  pgvector semantic search · analytics · knowledge base
+    │
+    ├─► COMMAND ─────► execution_agent
+    │                  mark done · update status · schedule meetings (memory-aware)
+    │
+    └─► REMEMBER ────► store_memory_direct (inline, no sub-agent)
+                       Global persistence across all browser sessions
 ```
 
-### Query Tasks
+## Technical Highlights
+
+### 8 Agents — Clear Separation of Concerns
+| Agent | Responsibility | Model |
+|---|---|---|
+| `root_agent` | Intent router — classifies input, delegates | gemini-2.5-flash |
+| `analysis_agent` | Summarise transcript, extract tasks, save meeting to DB | gemini-2.5-flash |
+| `save_and_schedule_agent` | Persist tasks to PostgreSQL, create Calendar events | gemini-2.5-flash |
+| `notes_agent` | Save meeting note, assemble final briefing (Python tools, no extra LLM) | gemini-2.5-flash |
+| `evaluation_agent` | LLM-as-Judge: grade quality on 4 dimensions, save score | **gemini-2.5-flash-lite** |
+| `query_agent` | Semantic search, analytics, overdue tracking | gemini-2.5-flash |
+| `execution_agent` | Mark done, update status, schedule with memory preferences | gemini-2.5-flash |
+| `transcript_pipeline` | SequentialAgent + ParallelAgent orchestrator | — |
+
+### 4 MCP Servers
+| MCP Server | Tools | External Integration |
+|---|---|---|
+| **Tasks MCP** | `save_tasks`, `update_task`, `check_duplicates` | PostgreSQL + pgvector |
+| **Calendar MCP** | `create_calendar_event`, `get_available_slots` | Google Calendar API |
+| **Notes MCP** | `save_note`, `search_notes`, `save_meeting_note` | PostgreSQL full-text |
+| **Workspace MCP** | `create_meeting_doc`, `search_gdrive`, `send_email` | Google Docs/Drive/Gmail API |
+
+### RAG — Semantic Search via pgvector + Vertex AI
+- Every task, note, and meeting is embedded using **Vertex AI `text-embedding-004`**
+- Stored in PostgreSQL with **pgvector** extension and IVFFlat indexes
+- Semantic deduplication: cosine similarity threshold 0.85 before saving any task
+- Query: `"find tasks similar to deploy authentication"` → returns semantically related tasks, not just keyword matches
+
+### LLM-as-Judge (Self-Evaluating AI)
+After every transcript, `evaluation_agent` grades its own pipeline output:
+- **Summary Quality** — did it capture all decisions and outcomes?
+- **Task Extraction Completeness** — were all action items found?
+- **Priority Accuracy** — are High/Medium/Low correctly assigned?
+- **Owner Attribution** — are tasks assigned to the right people?
+
+Score saved to `quality_scores` table. Viewable as a scorecard in the UI after every run.
+
+### Parallel Execution on Separate Quota Pools
+`notes_agent` (gemini-2.5-flash) and `evaluation_agent` (gemini-2.5-flash-lite) run simultaneously via `ParallelAgent`. Different model versions = separate Vertex AI quota buckets = no rate-limit collision.
+
+### Global Memory Persistence
+User preferences stored in a fixed `global_user_preferences` session — not tied to a browser tab or UUID. Memory survives browser refresh, new sessions, and different devices.
+
+Pre-injected into execution_agent's prompt at request time → zero runtime tool calls for scheduling preferences.
 
 ```
-User: "list all meetings"
-MeetingMind: Shows 12 meetings with dates
-
-User: "show tasks from Q3 Product meeting"
-MeetingMind: [5 tasks with priorities and owners]
-
-User: "what high priority tasks are pending?"
-MeetingMind: [Filtered task list]
+"Remember our team prefers morning meetings"
+→ Next: "Schedule demo with Sarah on Friday sarah@example.com"
+→ Agent reads injected memory, schedules at 9:00 AM automatically. No clarifying question.
 ```
 
-### Schedule Meetings
+### 33% Fewer LLM Calls
+Initial design: 6 LLM calls per transcript.  
+Current: 5 LLM calls per transcript.  
+Eliminated: `briefing_agent` (replaced with deterministic Python assembly) and `memory_store_agent` (replaced with inline Python tool call).
 
-```
-User: "schedule demo on Tuesday at 2pm with sarah@example.com"
-
-MeetingMind:
-📅 Calendar Event Ready
-
-Demo - Tuesday, April 7, 2026 at 2:00 PM IST
-Attendees: sarah@example.com
-
-[📅 Click here to add to Google Calendar](url) _(Ctrl+Click to open in new tab)_
-```
-
-Supports natural language dates:
-- "tomorrow", "next Monday"
-- "April 10th", "Tuesday"
-- Smart IST timezone conversion
-
-### Execute Commands
-
-```
-User: "mark API implementation as done"
-MeetingMind: ✅ Task marked as Done
-
-User: "set deployment task to in progress"
-MeetingMind: ✅ Status updated to In Progress
-
-
-## 🏗️ Architecture
-
-### Multi-Agent System (9 Agents)
-
-```
-User Input → Root Agent (Intent Router)
-    ↓
-┌─────────────────────────────────────────────────┐
-│  TRANSCRIPT Pipeline (Sequential + Parallel)    │
-│                                                  │
-│  Sequential:                                    │
-│  1. Summary Agent     → Extract meeting summary │
-│  2. Meeting Save      → Save to PostgreSQL      │
-│  3. Action Items      → Identify tasks          │
-│  4. Scheduler         → Create calendar events  │
-│  5. Duplicate Check   → Save tasks (skip dupes) │
-│  6. Briefing          → Format final output     │
-│                                                  │
-│  Parallel (Background):                         │
-│  • Notes Agent        → Save searchable notes   │
-│  • Memory Agent       → Store key decisions     │
-└─────────────────────────────────────────────────┘
-    ↓
-Query Agent / Execution Agent (Follow-up commands)
-```
-
-**Performance:** ~8-10 seconds per transcript
-
-### MCP Integration
-
-| MCP Server | Tools | Purpose |
-|------------|-------|---------|
-| **Tasks MCP** | `save_tasks`, `update_task`, `check_duplicates` | Task management |
-| **Calendar MCP** | `create_event`, `list_slots` | Google Calendar integration |
-| **Notes MCP** | `save_notes`, `search_notes` | Knowledge base |
-
-### Database Schema
+## Database Schema
 
 ```sql
-meetings (id, transcript, summary, session_id, created_at)
-tasks (id, meeting_id, task_name, owner, deadline, priority, status)
-notes (id, meeting_id, title, content, tags, created_at)
-memory (id, key, value, context, created_at)
+meetings     (id UUID, transcript TEXT, summary TEXT, embedding vector(768), doc_url TEXT, created_at)
+tasks        (id UUID, meeting_id UUID, task_name TEXT, owner TEXT, deadline TEXT,
+              priority TEXT, status TEXT, embedding vector(768), created_at)
+notes        (id UUID, meeting_id UUID, title TEXT, content TEXT, embedding vector(768))
+memory       (id UUID, session_id TEXT, key TEXT, value TEXT, embedding vector(768))
+quality_scores (id UUID, meeting_id UUID, summary_quality INT, task_extraction_completeness INT,
+                priority_accuracy INT, owner_attribution INT, overall_score FLOAT,
+                flags JSONB, recommendations JSONB, created_at)
 ```
 
-**Features:**
-- Connection pooling (1-10 connections)
-- 6 indexes for optimized queries
-- Duplicate detection with fuzzy matching
-- Transaction safety
+**Indexes:** IVFFlat on all 4 embedding columns · B-tree on `status`, `owner`, `priority`, `meeting_id`
 
+## React Dashboard
 
-## 🧪 Testing
+Single Cloud Run URL serves both the FastAPI backend and React frontend — no CORS, no separate deployments.
 
-### Run All Tests
+**4 tabs, all live data from the agent pipeline:**
+
+| Tab | What It Shows |
+|---|---|
+| **Tasks** | All extracted tasks · filter by status/owner/priority · inline status edit · deadline picker · bulk actions · CSV export |
+| **Meetings** | Timeline of processed meetings · expandable task list per meeting · progress bar · copy summary |
+| **Analytics** | Task ownership chart · weekly completion trend · overdue list with inline Mark Done · time saved estimate |
+| **Docs** | Every processed meeting auto-publishes a Google Doc · click to open |
+
+**Additional UI features:** Live pipeline visualizer (4-stage progress bar) · Quality scorecard popup after each transcript · Semantic search suggested queries · Voice input (Web Speech API) · Global memory across sessions · Real-time tab badge with overdue count
+
+## Deployment
+
+Single container on **Google Cloud Run** — auto-scales to zero, wakes on request.
+
+```
+Cloud Run (port 8080)
+  └─ FastAPI (server.py)
+       ├─ POST /api/chat       → ADK Runner (8-agent pipeline)
+       ├─ PATCH /api/tasks/:id → Direct DB update (no LLM)
+       ├─ GET  /api/tasks      → DB read with filters
+       ├─ GET  /api/meetings   → DB read
+       ├─ GET  /api/analytics  → Aggregated DB queries
+       ├─ GET  /api/quality    → quality_scores table
+       ├─ GET  /api/docs       → meetings with doc_url
+       └─ /*                   → React build (static files)
+```
+
+**Stack:** Python 3.11 · FastAPI · Google ADK · PostgreSQL + pgvector · Vertex AI · React + Vite + Tailwind · Docker (multi-stage build)
+
+## Quick Start
 
 ```bash
-pytest tests/ -v --cov=tools
+# 1. Clone and configure
+git clone <repo>
+cp .env.example .env
+# Edit .env with your GCP project, DB credentials, Calendar ID
+
+# 2. Initialize database
+pip install -r requirements.txt
+python init_db.py
+
+# 3. Deploy to Cloud Run
+bash deploy.sh
 ```
-
-### Test Coverage
-
-- `save_tasks()` - Duplicate prevention
-- `check_duplicate_tasks()` - Fuzzy matching
-- `save_meeting()` - Meeting ID generation
-- `list_my_tasks()` - Task filtering
-- `find_meeting_by_title()` - Meeting search
-- `parse_relative_date()` - Date calculation
-
-**Result:** 15 tests passed in 0.02s
-
-
-## 📁 Project Structure
-
-```
-meetingmind/
-├── agent.py                    # Main agent orchestration (9 agents)
-├── tools/
-│   ├── db_tools.py            # PostgreSQL operations
-│   ├── task_tools.py          # Task management
-│   ├── calendar_tools.py      # Google Calendar integration
-│   ├── notes_tools.py         # Notes management
-│   ├── date_helpers.py        # Date parsing utilities
-│   ├── state_tools.py         # Session state
-│   ├── metrics.py             # Performance tracking
-│   ├── mcp_wrapper.py         # MCP abstraction layer
-│   └── mcp_servers/           # MCP server implementations
-├── tests/
-│   ├── conftest.py            # Pytest fixtures
-│   ├── test_db_tools.py       # Database tests
-│   └── test_task_tools.py     # Task management tests
-├── init_db.py                 # Database initialization
-├── clear_tasks.py             # Clear database for testing
-├── mcp_config.json            # MCP configuration
-├── requirements.txt           # Python dependencies
-├── fresh_start.sh             # Automated complete setup (recommended)
-├── deploy.sh                  # Cloud Run deployment
-├── setup_gcp.sh               # GCP project setup (CHANGE PASSWORD!)
-├── enable_calendar_api.sh     # Enable Calendar API
-├── test_db_connection.sh      # Test database connection
-├── .env                       # Environment variables
-├── README.md                  # This file
-├── CLAUDE.md                  # Quick start guide
-└── SAMPLE_TRANSCRIPT.md       # Demo transcripts
-```
-
-
-## 🔧 Configuration
 
 ### Environment Variables
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `PROJECT_ID` | GCP project ID | `my-project-123` |
-| `DB_HOST` | PostgreSQL host | `10.1.2.3` |
-| `DB_NAME` | Database name | `meetingmind` |
-| `DB_USER` | Database user | `meetingmind_user` |
-| `DB_PASSWORD` | Database password | `secure-password` |
-| `CALENDAR_ID` | Google Calendar email | `user@gmail.com` |
-| `TIMEZONE` | Default timezone | `Asia/Kolkata` |
-| `MODEL` | Gemini model | `gemini-2.5-flash` |
+| Variable | Description |
+|---|---|
+| `PROJECT_ID` | GCP project ID |
+| `DB_HOST` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` | PostgreSQL connection |
+| `CALENDAR_ID` | Google Calendar email for event creation |
+| `MODEL` | Primary model (default: `gemini-2.5-flash`) |
+| `EVAL_MODEL` | Evaluation agent model (default: `gemini-2.5-flash-lite`) |
 
-### MCP Servers
+## Project Structure
 
-Configured in `mcp_config.json`:
-
-```json
-{
-  "tasks_mcp": {
-    "command": "python",
-    "args": ["tools/mcp_servers/tasks_mcp_server.py"]
-  },
-  "calendar_mcp": {
-    "command": "python",
-    "args": ["tools/mcp_servers/calendar_mcp_server.py"]
-  },
-  "notes_mcp": {
-    "command": "python",
-    "args": ["tools/mcp_servers/notes_mcp_server.py"]
-  }
-}
+```
+catalyst/
+├── agent.py                    # 8 agents — root, pipeline, query, execution, evaluation
+├── server.py                   # FastAPI — /api/* routes + React static serving
+├── tools/
+│   ├── db_tools.py            # PostgreSQL + pgvector CRUD + semantic search
+│   ├── embeddings.py          # Vertex AI text-embedding-004 wrapper
+│   ├── analytics_tools.py     # Ownership, trends, velocity, overdue analytics
+│   ├── workspace_tools.py     # Google Docs/Drive/Gmail tools
+│   ├── calendar_tools.py      # Google Calendar event creation
+│   ├── notes_tools.py         # Meeting notes + briefing assembly
+│   ├── mcp_wrapper.py         # MCP abstraction layer
+│   └── mcp_servers/           # 4 MCP server implementations
+├── frontend/src/App.jsx        # React dashboard — all UI components
+├── schema.sql                  # PostgreSQL schema with pgvector
+├── Dockerfile                  # Multi-stage: Node build → Python serve
+├── DEMO_SCRIPT.md              # 5-minute demo script
+└── SAMPLE_TRANSCRIPT.md        # 4 realistic test transcripts
 ```
 
-
-## 🚢 Deployment
-
-### Cloud Run Deployment
+## Tests
 
 ```bash
-# Deploy with default settings
-bash deploy.sh
-
-# Check deployment status
-gcloud run services describe meetingmind --region=us-central1
-
-# View logs
-gcloud logging read "resource.type=cloud_run_revision" --limit=50
+pytest tests/ -v
 ```
 
-### Environment Configuration
+15 unit tests covering: task deduplication · semantic search · date parsing · meeting save/load · task filtering · analytics queries
 
-The deployment script automatically:
-- Sets environment variables from `.env`
-- Configures memory (2GB) and CPU (2 vCPU)
-- Sets max instances (10) and concurrency (80)
-- Tags service for billing tracking
-
-
-## 📊 Performance
-
-| Operation | Average Time |
-|-----------|-------------|
-| Meeting save | 0.14s |
-| Task save (batch) | 0.09s |
-| Duplicate check | 0.02s |
-| Calendar event | 0.32s |
-| **Full transcript** | **8.5s** |
-
-Tested with: 1,247 character transcript, 5 tasks, 2 events
-
-
-## 🗄️ Database Management
-
-### Clear Database for Testing
-
-If you need to clean up your database (remove all tasks and meetings):
-
-```bash
-python clear_tasks.py
-```
-
-This script will:
-- Delete all tasks from the database
-- Delete all meetings from the database
-- Preserve the database schema (tables remain)
-
-**Use cases:**
-- Testing with fresh data
-- Removing test entries before production
-- Clearing duplicate data after multiple test runs
-
-**Warning:** This action cannot be undone. All meeting transcripts and tasks will be permanently deleted.
-
-### Database Backup (Recommended)
-
-Before clearing the database, create a backup:
-
-```bash
-# Backup all data
-pg_dump -h $DB_HOST -U $DB_USER -d $DB_NAME > backup_$(date +%Y%m%d).sql
-
-# Restore from backup if needed
-psql -h $DB_HOST -U $DB_USER -d $DB_NAME < backup_20260406.sql
-```
-
-
-## 🐛 Troubleshooting
-
-### Common Issues
-
-**1. Database connection fails**
-```bash
-# Test connection
-bash test_db_connection.sh
-
-# Check if Cloud SQL proxy is running
-ps aux | grep cloud_sql_proxy
-```
-
-**2. Calendar API not enabled**
-```bash
-bash enable_calendar_api.sh
-```
-
-**3. Deployment fails**
-```bash
-# Check gcloud authentication
-gcloud auth list
-
-# Verify project ID
-gcloud config get-value project
-```
-
-**4. Missing dependencies**
-```bash
-pip install -r requirements.txt
-```
-
-
-## 🤝 Contributing
-
-This project was built for the Gen AI Academy APAC - Multi-Agent Systems with MCP Hackathon 2026.
-
-To contribute:
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit changes (`git commit -m 'Add amazing feature'`)
-4. Push to branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-
-Built for **Gen AI Academy APAC — Multi-Agent Systems with MCP Hackathon 2026**
-
-
-## 🙏 Acknowledgments
-
-- Google Agent Development Kit (ADK) team
-- Anthropic's Model Context Protocol (MCP)
-- Gen AI Academy APAC Hackathon organizers
-- PostgreSQL and Google Cloud teams
-
-
-## 📚 Additional Documentation
-
-- **[SAMPLE_TRANSCRIPT.md](SAMPLE_TRANSCRIPT.md)** - Demo meeting transcripts for testing
-
-
-**Built with ❤️ using Google ADK, MCP, PostgreSQL, and pytz**
+**Built for Google Gen AI Academy APAC — Multi-Agent Systems with MCP Competition 2026**  

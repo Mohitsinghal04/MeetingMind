@@ -21,15 +21,16 @@ from googleapiclient.errors import HttpError
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 # Calendar configuration
-SCOPES = ['https://www.googleapis.com/auth/calendar']
+SCOPES = ["https://www.googleapis.com/auth/calendar"]
 CALENDAR_ID = os.getenv("CALENDAR_ID", "primary")
 DEFAULT_TIMEZONE = os.getenv("TIMEZONE", "America/Los_Angeles")
+
 
 def get_calendar_service():
     """Get authenticated Google Calendar service using Application Default Credentials."""
     try:
         credentials, project = default(scopes=SCOPES)
-        service = build('calendar', 'v3', credentials=credentials)
+        service = build("calendar", "v3", credentials=credentials)
         logging.info("✅ Calendar service authenticated")
         return service
     except Exception as e:
@@ -37,7 +38,13 @@ def get_calendar_service():
         return None
 
 
-def generate_calendar_link(title: str, start_time: str, duration_minutes: int, attendees: Optional[str] = None, description: Optional[str] = None) -> dict:
+def generate_calendar_link(
+    title: str,
+    start_time: str,
+    duration_minutes: int,
+    attendees: Optional[str] = None,
+    description: Optional[str] = None,
+) -> dict:
     """Generate a pre-filled Google Calendar link that users can click to create events.
 
     This is the fallback method when Calendar API fails or isn't available.
@@ -102,27 +109,22 @@ def generate_calendar_link(title: str, start_time: str, duration_minutes: int, a
         return {
             "status": "link_generated",
             "calendar_url": calendar_url,
-            "calendar_link_html": f'[📅 Click here to add to Google Calendar]({calendar_url}) _(Ctrl+Click or Cmd+Click to open in new tab)_',
+            "calendar_link_html": f"[📅 Click here to add to Google Calendar]({calendar_url}) _(Ctrl+Click or Cmd+Click to open in new tab)_",
             "title": title,
             "start_time": start_time,
             "duration_minutes": duration_minutes,
             "attendees": attendees.split(",") if attendees else [],
             "method": "calendar_link",
-            "instructions": "Click the link to review and create the event in your Google Calendar. You can then send invitations to attendees."
+            "instructions": "Click the link to review and create the event in your Google Calendar. You can then send invitations to attendees.",
         }
 
     except Exception as e:
         logging.error(f"❌ Error generating calendar link: {e}")
-        return {
-            "status": "error",
-            "message": f"Failed to generate calendar link: {e}"
-        }
+        return {"status": "error", "message": f"Failed to generate calendar link: {e}"}
 
 
 def get_available_slots(
-    tool_context: ToolContext,
-    date: Optional[str] = None,
-    duration_minutes: int = 60
+    tool_context: ToolContext, date: Optional[str] = None, duration_minutes: int = 60
 ) -> dict:
     """Get available calendar time slots for scheduling.
 
@@ -150,7 +152,7 @@ def get_available_slots(
             "status": "success",
             "date": date,
             "available_slots": slots,
-            "duration_minutes": duration_minutes
+            "duration_minutes": duration_minutes,
         }
 
     except Exception as e:
@@ -162,7 +164,7 @@ def get_available_slots(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=2, max=10),
     retry=lambda e: isinstance(e, HttpError) and e.resp.status in [500, 503, 429],
-    reraise=True
+    reraise=True,
 )
 def create_calendar_event(
     tool_context: ToolContext,
@@ -170,7 +172,7 @@ def create_calendar_event(
     start_time: str,
     duration_minutes: int = 60,
     attendees: Optional[str] = None,
-    description: Optional[str] = None
+    description: Optional[str] = None,
 ) -> dict:
     """SIMPLIFIED: Generate pre-filled Google Calendar link for user to create event.
 
