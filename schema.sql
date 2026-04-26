@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS meetings (
 
 -- Add doc_url to existing deployments that predate this column
 ALTER TABLE meetings ADD COLUMN IF NOT EXISTS doc_url TEXT;
+-- Track semantic duplicates blocked per meeting run
+ALTER TABLE meetings ADD COLUMN IF NOT EXISTS duplicates_blocked INT DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS tasks (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),

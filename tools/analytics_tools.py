@@ -213,7 +213,8 @@ def get_meeting_velocity(tool_context: ToolContext) -> dict:
                     COUNT(t.id)                                                   AS total_tasks,
                     SUM(CASE WHEN t.status = 'Done' THEN 1 ELSE 0 END)           AS completed_tasks,
                     SUM(CASE WHEN t.priority = 'High'
-                              AND t.status NOT IN ('Done','Cancelled') THEN 1 ELSE 0 END) AS open_high_priority
+                              AND t.status NOT IN ('Done','Cancelled') THEN 1 ELSE 0 END) AS open_high_priority,
+                    COALESCE(SUM(m.duplicates_blocked), 0)                        AS duplicates_blocked
                 FROM meetings m
                 LEFT JOIN tasks t ON t.meeting_id = m.id
             """
@@ -221,7 +222,7 @@ def get_meeting_velocity(tool_context: ToolContext) -> dict:
             row = cur.fetchone()
             cur.close()
 
-        meetings, total, done, high_open = row
+        meetings, total, done, high_open, dupes = row
         avg_tasks = round(total / meetings, 1) if meetings > 0 else 0
         completion_rate = round((done / total) * 100) if total > 0 else 0
 
@@ -233,6 +234,7 @@ def get_meeting_velocity(tool_context: ToolContext) -> dict:
             "open_high_priority": high_open,
             "avg_tasks_per_meeting": avg_tasks,
             "overall_completion_rate_pct": completion_rate,
+            "duplicates_blocked": int(dupes or 0),
         }
 
     except Exception as e:

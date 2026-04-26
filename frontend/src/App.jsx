@@ -99,10 +99,9 @@ const isTaskUpdateConfirm = (reply) =>
 // ── Pipeline Visualizer ────────────────────────────────────
 
 const PIPELINE_STAGES = [
-  { label: 'Summarise', icon: '📝' },
-  { label: 'Save',      icon: '💾' },
-  { label: 'Notes',     icon: '📓' },
-  { label: 'Briefing',  icon: '✨' },
+  { label: 'Analyse',      icon: '📝', parallel: false },
+  { label: 'Save',         icon: '💾', parallel: false },
+  { label: 'Notes ∥ Eval', icon: '⚡', parallel: true  },
 ]
 
 function PipelineVisualizer({ currentStage, complete }) {
@@ -115,11 +114,15 @@ function PipelineVisualizer({ currentStage, complete }) {
           const active = !complete && i === currentStage
           return (
             <div key={s.label} className="flex items-center flex-1">
-              <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold transition-all duration-500 shrink-0
+              <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold transition-all duration-500 shrink-0 relative
                 ${done   ? 'bg-emerald-500 text-white'
                 : active ? 'bg-indigo-500 text-white animate-pulse'
                          : 'bg-gray-100 text-gray-400'}`}>
                 {done ? '✓' : s.icon}
+                {/* Parallel badge */}
+                {s.parallel && active && (
+                  <span className="absolute -top-1 -right-1 w-3 h-3 bg-violet-500 rounded-full flex items-center justify-center text-[7px] text-white font-black">∥</span>
+                )}
               </div>
               {i < PIPELINE_STAGES.length - 1 && (
                 <div className={`flex-1 h-0.5 mx-1 rounded transition-all duration-500
@@ -129,7 +132,7 @@ function PipelineVisualizer({ currentStage, complete }) {
           )
         })}
       </div>
-      {/* Labels row — each label centred under its circle */}
+      {/* Labels row */}
       <div className="flex mt-1.5">
         {PIPELINE_STAGES.map((s, i) => {
           const done   = complete || i < currentStage
@@ -138,7 +141,7 @@ function PipelineVisualizer({ currentStage, complete }) {
             <div key={s.label} className="flex-1 flex justify-start">
               <span className={`text-xs font-medium transition-colors duration-300 leading-tight
                 ${done   ? 'text-emerald-600'
-                : active ? 'text-indigo-600'
+                : active ? s.parallel ? 'text-violet-600' : 'text-indigo-600'
                          : 'text-gray-300'}`}>
                 {s.label}
               </span>
@@ -387,10 +390,10 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
     return () => window.removeEventListener('keydown', handler)
   }, [])
 
-  const send = async () => {
-    const msg = input.trim()
+  const send = async (overrideMsg) => {
+    const msg = (overrideMsg ?? input).trim()
     if (!msg || loading) return
-    setInput('')
+    if (!overrideMsg) setInput('')
     setMessages(m => [...m, { role: 'user', text: msg, ts: Date.now() }])
     setLoading(true)
     const wasTaskCommand  = isTaskUpdate(msg)
@@ -494,9 +497,10 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={() => setInput(DEMO_TRANSCRIPT)}
-            className="text-xs bg-white/20 hover:bg-white/30 backdrop-blur px-2.5 py-1 rounded-full font-medium transition-colors"
-            title="Load a sample transcript to demo the full pipeline"
+            onClick={() => send(DEMO_TRANSCRIPT)}
+            disabled={loading}
+            className="text-xs bg-white/20 hover:bg-white/30 backdrop-blur px-2.5 py-1 rounded-full font-medium transition-colors disabled:opacity-40"
+            title="Auto-process a sample transcript through the full pipeline"
           >
             ▶ Try Demo
           </button>
@@ -1400,16 +1404,26 @@ function Skeleton({ className = '' }) {
 }
 
 function AnalyticsPanel({ onOwnerClick, onTabChange, onTasksNav, onTaskUpdated }) {
-  const [data,      setData]      = useState(null)
-  const [loading,   setLoading]   = useState(true)
-  const [doneIds,   setDoneIds]   = useState(new Set())
-  const [spinning,  setSpinning]  = useState(false)
+  const [data,        setData]        = useState(null)
+  const [loading,     setLoading]     = useState(true)
+  const [doneIds,     setDoneIds]     = useState(new Set())
+  const [spinning,    setSpinning]    = useState(false)
+  const [avgQuality,  setAvgQuality]  = useState(null)  // avg overall_score across all runs
 
   const reload = (manual = false) => {
     if (manual) setSpinning(true)
     else setLoading(true)
-    fetch('/api/analytics')
-      .then(r => r.json()).then(setData).catch(console.error)
+    Promise.all([
+      fetch('/api/analytics').then(r => r.json()),
+      fetch('/api/quality').then(r => r.json()).catch(() => null),
+    ]).then(([analytics, quality]) => {
+      setData(analytics)
+      const scores = quality?.quality_scores ?? []
+      if (scores.length > 0) {
+        const avg = scores.reduce((s, q) => s + (q.overall_score ?? 0), 0) / scores.length
+        setAvgQuality(avg.toFixed(1))
+      }
+    }).catch(console.error)
       .finally(() => { setLoading(false); setSpinning(false) })
   }
   useEffect(() => reload(), [])
@@ -1530,12 +1544,13 @@ function AnalyticsPanel({ onOwnerClick, onTabChange, onTasksNav, onTaskUpdated }
       </div>
 
       {/* Stat Cards — clickable */}
-      <div className="grid grid-cols-4 gap-3">
+      <div className="grid grid-cols-5 gap-3">
         {[
           { icon:'📅', label:'Meetings',   value: velocity.total_meetings ?? 0,        color:'text-indigo-700', action: () => onTabChange('meetings') },
           { icon:'📌', label:'Open Tasks', value: openTasks,                            color:'text-amber-700',  action: () => onTasksNav('Pending') },
           { icon:'⚠️', label:'Overdue',    value: data.overdue?.overdue_tasks?.length ?? 0, color:'text-red-600', action: () => onTasksNav('Overdue') },
-          { icon:'✅', label:'Completion', value: `${completionPct}%`,            color:'text-emerald-700',action: () => onTasksNav('Done') },
+          { icon:'✅', label:'Completion', value: `${completionPct}%`,                 color:'text-emerald-700',action: () => onTasksNav('Done') },
+          { icon:'🏅', label:'Avg Quality',value: avgQuality ? `${avgQuality}/5` : '—', color: avgQuality >= 4 ? 'text-emerald-700' : avgQuality >= 3 ? 'text-amber-600' : 'text-gray-400', action: null },
         ].map(c => (
           <div
             key={c.label}

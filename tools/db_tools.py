@@ -208,20 +208,28 @@ def save_tasks(
                 saved_ids.append(task_id)
                 logging.info(f"✅ Saved task: {task_name}")
 
+            # Persist duplicate count to meetings table so analytics can aggregate it
+            skip_count = len(skipped_duplicates)
+            if meeting_id and skip_count > 0:
+                cur.execute(
+                    "UPDATE meetings SET duplicates_blocked = COALESCE(duplicates_blocked, 0) + %s WHERE id = %s",
+                    (skip_count, str(meeting_id)),
+                )
+
             conn.commit()
             cur.close()
 
             result = {
                 "status": "success",
                 "tasks_saved": len(saved_ids),
-                "tasks_skipped": len(skipped_duplicates),
+                "tasks_skipped": skip_count,
                 "task_ids": saved_ids,
             }
 
             if skipped_duplicates:
                 result["skipped_details"] = skipped_duplicates
                 logging.info(
-                    f"📊 Save summary: {len(saved_ids)} saved, {len(skipped_duplicates)} duplicates skipped"
+                    f"📊 Save summary: {len(saved_ids)} saved, {skip_count} duplicates skipped"
                 )
             else:
                 logging.info(f"📊 Saved {len(saved_ids)} tasks to DB (no duplicates)")
