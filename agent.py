@@ -32,6 +32,7 @@ from .tools.db_tools import (
     get_meeting_summary,
     list_all_meetings,
     get_note_by_id,
+    get_all_memories_as_context,
 )
 # MCP-compatible imports
 from .tools.mcp_wrapper import (
@@ -96,7 +97,8 @@ _STATE_DEFAULTS = {
     "evaluation_result": {},
     "save_schedule_result": "",
     "analysis_status": "",
-    "final_briefing": ""
+    "final_briefing": "",
+    "memory_context": ""
 }
 
 
@@ -156,6 +158,8 @@ def set_user_query(tool_context: ToolContext, query: str) -> dict:
 
 def set_user_command(tool_context: ToolContext, command: str) -> dict:
     """Save a user command to state for the execution agent.
+    Also pre-fetches all stored memories so execution_agent has them without
+    making any extra tool calls (eliminates timeout on time-preference lookup).
 
     Args:
         tool_context: ADK tool context.
@@ -166,6 +170,9 @@ def set_user_command(tool_context: ToolContext, command: str) -> dict:
     """
     _ensure_state_defaults(tool_context)
     tool_context.state["user_command"] = command
+    # Pre-load all global memories into state so execution_agent reads them
+    # from the prompt directly — no get_memory tool call needed at runtime.
+    tool_context.state["memory_context"] = get_all_memories_as_context()
     return {"status": "success", "command": command}
 
 
@@ -390,26 +397,22 @@ Output a brief confirmation: how many tasks saved, how many calendar events crea
 notes_agent = Agent(
     name="notes_agent",
     model=model_name,
-    description="Searches related past notes, saves the current meeting note, then assembles the final briefing.",
+    description="Saves the current meeting note then immediately assembles the final briefing.",
     instruction="""
-You are a knowledge base manager. Complete THREE tasks in order:
+You are a knowledge base manager. Complete TWO tasks in order:
 
 MEETING_SUMMARY:
 {meeting_summary}
 
-━━━ TASK 1: Search related past notes ━━━
-Extract 2-3 key topics from MEETING_SUMMARY.
-Call search_related_notes for each topic to find relevant past notes.
-
-━━━ TASK 2: Save the current meeting note ━━━
+━━━ TASK 1: Save the current meeting note ━━━
 Call save_meeting_note with a short descriptive title and the full MEETING_SUMMARY as content.
 
-━━━ TASK 3: Assemble final briefing (MANDATORY LAST STEP) ━━━
-After Tasks 1 and 2 are complete, call assemble_briefing_from_state() immediately.
+━━━ TASK 2: Assemble final briefing (MANDATORY LAST STEP) ━━━
+Immediately after Task 1, call assemble_briefing_from_state().
 Output ONLY the return value of that call verbatim — no other text, no JSON, no wrapping.
 The returned text starts with ✅ **Meeting Processed Successfully** — relay it exactly as-is.
 """,
-    tools=[search_related_notes, save_meeting_note, assemble_briefing_from_state],
+    tools=[save_meeting_note, assemble_briefing_from_state],
     output_key="final_briefing"
 )
 
@@ -723,32 +726,56 @@ Available tools:
 - mark_task_in_progress(task_name): mark a task as in progress
 - update_task_status(task_name, status): set any custom status
 - create_calendar_event(title, start_time, duration_minutes, attendees, description): schedule with Google Meet
-- get_memory(key): retrieve stored user preferences and context
 - save_note(...): add a new note
 
 User's request:
 {user_command}
 
 ═══════════════════════════════════════════
-INTELLIGENCE ENHANCEMENT: CONTEXT-AWARE SCHEDULING
+STORED PREFERENCES (pre-loaded — no tool call needed)
 ═══════════════════════════════════════════
-
-BEFORE asking user for missing details when scheduling a meeting:
-1. Check if a person's name is mentioned (e.g. "Alex", "John", "Sarah")
-2. Use get_memory to search for preferences about that person
-3. Look for: meeting time preferences, timezone, availability patterns
-4. If found, USE that information to fill in missing details intelligently
-
-Example workflow:
-User: "Schedule a meeting with Alex for demo review on April 5th"
-→ Step 1: Use get_memory("alex") or get_memory("meeting_preference") to check stored info
-→ Step 2: If memory returns "Alex likes morning meetings" → infer time as 9:00 AM or 10:00 AM
-→ Step 3: If email not provided, ask for it (you can't infer emails)
-→ Step 4: Create event with inferred time: "2026-04-05 09:00"
-
-This makes you MUCH smarter and reduces back-and-forth with users!
+{memory_context}
 
 ═══════════════════════════════════════════
+PREFERENCE PRIORITY RULES (read carefully)
+═══════════════════════════════════════════
+When the user's request mentions a specific person (e.g. "Sarah", "John"), apply this
+priority order to pick the meeting time — stop at the first match:
+
+  1. PERSON-SPECIFIC preference in memory
+     e.g. "sarah prefers afternoon" → use 14:00 for Sarah's meetings
+     e.g. "john likes evening meetings" → use 18:00 for John's meetings
+
+  2. GENERAL / TEAM preference in memory
+     e.g. "all members like morning meetings" → use 09:00
+     e.g. "team prefers afternoon" → use 14:00
+
+  3. HARDCODED DEFAULT → 09:00 (9 AM) — only if nothing in memory applies
+
+Time-of-day mapping:
+  "morning"   → 09:00
+  "afternoon" → 14:00
+  "evening"   → 18:00
+  "noon"      → 12:00
+  "end of day"→ 17:00
+
+CRITICAL: Do NOT call get_memory. All preferences are already shown in STORED PREFERENCES above.
+
+═══════════════════════════════════════════
+SCHEDULING RULES — MISSING PARAMETERS
+═══════════════════════════════════════════
+
+When scheduling, fill gaps using this priority order (NO extra tool calls):
+1. TIME not given → apply PREFERENCE PRIORITY RULES above → use matched time silently
+2. DURATION not given → default to 60 minutes silently
+3. EMAIL not given → ask for it (emails cannot be inferred) — this is the ONLY thing you ask about
+4. DATE not given → ask for it
+
+When you use a preference from memory, mention it briefly in your reply:
+e.g. "Scheduling at 2 PM as Sarah prefers afternoon meetings."
+e.g. "Using 9 AM based on your team's morning preference."
+
+CRITICAL: Never call get_memory at runtime. Preferences are already injected above. Calling get_memory wastes time and causes timeouts.
 
 Examples:
 - "Mark task 1 as done" → mark_task_done("first task name")
@@ -785,18 +812,12 @@ CRITICAL for calendar event creation:
    - "next week" → adds 7 days
    - "April 10th" → parses month/day
 
-   Context for reference: Today is 2026-04-05 (Sunday)
-   - "Monday" → 2026-04-06 (next day)
-   - "Tuesday" → 2026-04-07
-   - "Wednesday" → 2026-04-08
-   - "tomorrow" → 2026-04-06 (Monday)
-
    TIME PARSING (24-hour format in IST):
    - "2pm" → "14:00"
    - "10am" → "10:00"
    - "9:30am" → "09:30"
    - "3:45pm" → "15:45"
-   - If time not specified: CHECK MEMORY for person's preference BEFORE asking user
+   - If time not in request → check STORED PREFERENCES section above → else default 09:00
 
    COMPLETE EXAMPLE:
    User: "schedule meeting on Tuesday at 2pm"
@@ -889,10 +910,10 @@ THE MARKDOWN LINK MUST APPEAR EXACTLY AS THE TOOL RETURNS IT!
         mark_task_done,
         mark_task_in_progress,
         update_task_status,
-        parse_relative_date,  # ← NEW: Reliable date calculation
+        parse_relative_date,
         create_calendar_event,
-        get_memory,
-        save_note
+        save_note,
+        # get_memory intentionally removed — preferences pre-loaded into {memory_context}
     ],
     output_key="execution_result"
 )
@@ -999,7 +1020,7 @@ PASS 1 — KEYWORD TRIGGERS (High Confidence):
 1. If message contains ["remember", "note that", "keep in mind", "store", "save this"]:
    → INTENT D (STORE) - call set_memory_input(information=<text>) then call store_memory_direct() and output the result — NO sub-agent needed
 
-2. If message contains ["mark", "mark as", "update status", "schedule", "set to", "complete"]:
+2. If message contains ["mark", "mark as", "update status", "schedule", "set to", "complete", "set up", "book", "book a", "create a meeting", "arrange a meeting", "organise a meeting", "organize a meeting", "cancel meeting", "reschedule", "move meeting", "add to calendar", "put on calendar"]:
    → INTENT C (COMMAND) - call set_user_command immediately
 
 3. If message starts with or contains ["what", "show me", "list", "find", "search", "get", "pending", "which", "who has", "overdue", "recurring", "analytics", "trending", "velocity", "quality score", "create a doc", "google doc", "make a document", "search drive", "send email", "email summary"]:

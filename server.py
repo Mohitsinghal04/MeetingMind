@@ -300,14 +300,17 @@ async def chat(req: ChatRequest):
     )
 
 
-class TaskStatusUpdate(BaseModel):
-    status: str
+class TaskUpdate(BaseModel):
+    status:   Optional[str] = None   # Pending | In Progress | Done | Cancelled
+    deadline: Optional[str] = None   # YYYY-MM-DD, or "" to clear
 
 @app.patch("/api/tasks/{task_id}")
-async def patch_task_status(task_id: str, body: TaskStatusUpdate):
-    valid = {"Pending", "In Progress", "Done", "Cancelled"}
-    if body.status not in valid:
-        raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {sorted(valid)}")
+async def patch_task(task_id: str, body: TaskUpdate):
+    valid_statuses = {"Pending", "In Progress", "Done", "Cancelled"}
+    if body.status is not None and body.status not in valid_statuses:
+        raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {sorted(valid_statuses)}")
+    if body.status is None and body.deadline is None:
+        raise HTTPException(status_code=400, detail="Provide at least one of: status, deadline")
     try:
         with __import__("psycopg2").connect(
             host=os.getenv("DB_HOST"), dbname=os.getenv("DB_NAME"),
@@ -315,20 +318,29 @@ async def patch_task_status(task_id: str, body: TaskStatusUpdate):
             port=int(os.getenv("DB_PORT", 5432)),
         ) as conn:
             cur = conn.cursor()
+            # Build SET clause dynamically — only update provided fields
+            sets, params = [], []
+            if body.status is not None:
+                sets.append("status = %s"); params.append(body.status)
+            if body.deadline is not None:
+                # Empty string → store as NULL (unset deadline)
+                dl = body.deadline.strip() or None
+                sets.append("deadline = %s"); params.append(dl)
+            params.append(task_id)
             cur.execute(
-                "UPDATE tasks SET status = %s WHERE id = %s RETURNING id, task_name, status",
-                (body.status, task_id),
+                f"UPDATE tasks SET {', '.join(sets)} WHERE id = %s RETURNING id, task_name, status, deadline",
+                params,
             )
             row = cur.fetchone()
             conn.commit()
             cur.close()
         if not row:
             raise HTTPException(status_code=404, detail="Task not found")
-        return {"id": str(row[0]), "task_name": row[1], "status": row[2]}
+        return {"id": str(row[0]), "task_name": row[1], "status": row[2], "deadline": row[3]}
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"patch_task_status failed: {e}")
+        logger.error(f"patch_task failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

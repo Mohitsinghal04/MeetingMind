@@ -32,15 +32,25 @@ const statusBadge = (s) => ({
 }[s] ?? 'bg-gray-50 text-gray-500')
 
 const fmtDate = (val) => {
-  if (!val) return '—'
+  if (!val || val === 'TBD' || val === 'Not specified') return '—'
   const s = String(val)
-  // Handle "By July 24, 2026", "Week of July 13, 2026", ISO dates
   if (s.includes('-')) {
     const d = new Date(s)
-    return isNaN(d) ? s : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+    return isNaN(d) ? s : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
   }
-  // Shorten natural language dates
   return s.replace(/^(By|Before|Week of|Before )\s*/i, '').slice(0, 18)
+}
+
+// Convert any deadline string to YYYY-MM-DD for <input type="date"> value,
+// or '' if unparseable (which will show the placeholder).
+const toISODate = (val) => {
+  if (!val || val === 'TBD' || val === 'Not specified') return ''
+  const s = String(val)
+  // Already ISO
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
+  const d = new Date(s)
+  if (isNaN(d)) return ''
+  return d.toISOString().slice(0, 10)
 }
 
 const meetingTitle = (summary) => {
@@ -188,7 +198,21 @@ const WELCOME = '👋 **Welcome to MeetingMind!**\n\nI\'m powered by **8 special
 const MESSAGES_KEY = 'mm_messages'
 
 // ── Speech Recognition hook ────────────────────────────────
-function useSpeechRecognition({ onFinalText, onInterim }) {
+// ── Toast notification ─────────────────────────────────────
+function Toast({ message, onDone }) {
+  useEffect(() => {
+    const t = setTimeout(onDone, 3000)
+    return () => clearTimeout(t)
+  }, [onDone])
+  return (
+    <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 bg-gray-800 text-white text-xs font-medium rounded-full shadow-xl flex items-center gap-2" style={{ animation: 'fadeInUp .25s ease' }}>
+      <span className="w-2 h-2 rounded-full bg-red-400 animate-pulse shrink-0" />
+      {message}
+    </div>
+  )
+}
+
+function useSpeechRecognition({ onFinalText, onInterim, onToast }) {
   const recRef   = useRef(null)
   const timerRef = useRef(null)
   const [isRecording, setIsRecording] = useState(false)
@@ -227,7 +251,10 @@ function useSpeechRecognition({ onFinalText, onInterim }) {
     rec.onend = () => {
       // Auto-restart if still recording (browser cuts off after ~60s)
       if (recRef.current) {
-        try { recRef.current.start() } catch {}
+        try {
+          recRef.current.start()
+          onToast?.('🎙 Mic restarted — browser 60s limit reached, continuing…')
+        } catch {}
       }
     }
 
@@ -236,7 +263,7 @@ function useSpeechRecognition({ onFinalText, onInterim }) {
     setIsRecording(true)
     setDuration(0)
     timerRef.current = setInterval(() => setDuration(d => d + 1), 1000)
-  }, [onFinalText, onInterim])
+  }, [onFinalText, onInterim, onToast])
 
   const stop = useCallback(() => {
     if (recRef.current) {
@@ -269,6 +296,7 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
   const [pipelineStage, setPipelineStage] = useState(-1)  // -1 = not active
   const [isTranscript,  setIsTranscript]  = useState(false)
   const [interimText,   setInterimText]   = useState('')
+  const [toast,         setToast]         = useState(null)
   const [sessionId]                       = useState(() => {
     const k = 'mm_sid'
     return localStorage.getItem(k) || (() => {
@@ -286,7 +314,7 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
   }, [])
 
   const { isRecording, duration, supported, start: startMic, stop: stopMic } =
-    useSpeechRecognition({ onFinalText, onInterim: setInterimText })
+    useSpeechRecognition({ onFinalText, onInterim: setInterimText, onToast: setToast })
 
   const toggleMic = () => {
     if (isRecording) {
@@ -369,14 +397,22 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
 
       if (isProcessed) {
         onTranscriptProcessed?.()
-        // Fetch quality score and append as special message
-        try {
-          const q = await fetch('/api/quality').then(r => r.json())
-          const latest = (q?.quality_scores ?? [])[0] ?? null
-          if (latest?.overall_score) {
-            setMessages(m => [...m, { role: 'quality', data: latest }])
+        // Fetch quality score — 2s wait for evaluation_agent, 1 retry at 4s, then give up
+        // No LLM calls — just a DB read each time
+        ;(async () => {
+          for (const delay of [2000, 4000]) {
+            await new Promise(r => setTimeout(r, delay))
+            try {
+              const q = await fetch('/api/quality').then(r => r.json())
+              const latest = (q?.quality_scores ?? [])[0] ?? null
+              if (latest?.overall_score != null) {
+                setMessages(m => [...m, { role: 'quality', data: latest }])
+                return   // got it — stop
+              }
+            } catch {}
           }
-        } catch {}
+          // Silent give-up after 6s total — scorecard simply doesn't appear
+        })()
       } else if (wasTaskCommand && isTaskUpdateConfirm(reply)) {
         onTaskUpdated?.()
       }
@@ -394,12 +430,14 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
   }
 
   return (
+    <>
+    {toast && <Toast message={toast} onDone={() => setToast(null)} />}
     <div className="flex flex-col h-full bg-white">
       {/* Header */}
       <div className="px-5 py-4 bg-gradient-to-r from-indigo-600 to-indigo-500 text-white flex items-center justify-between shrink-0">
         <div className="flex items-center gap-2.5">
           <span className="text-lg font-bold tracking-tight">🧠 MeetingMind</span>
-          <span className="text-xs bg-white/20 backdrop-blur px-2.5 py-0.5 rounded-full font-medium">10 Agents</span>
+          <span className="text-xs bg-white/20 backdrop-blur px-2.5 py-0.5 rounded-full font-medium">8 Agents</span>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -574,6 +612,7 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
         </p>
       </div>
     </div>
+    </>
   )
 }
 
@@ -581,12 +620,118 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
 
 const PRIORITY_ORDER = { High: 0, Medium: 1, Low: 2 }
 
+// ── Task Detail Modal ──────────────────────────────────────
+function TaskDetailModal({ task, onClose, onStatusChange, onDeadlineChange }) {
+  if (!task) return null
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" />
+      <div
+        className="relative bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 space-y-4"
+        onClick={e => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-start justify-between gap-3">
+          <h2 className="text-base font-bold text-gray-800 leading-snug flex-1">{task.task_name}</h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl leading-none shrink-0">×</button>
+        </div>
+
+        {/* Meta grid */}
+        <div className="grid grid-cols-2 gap-3">
+          {/* Owner */}
+          <div className="bg-gray-50 rounded-xl p-3">
+            <p className="text-xs text-gray-400 font-medium mb-0.5">Owner</p>
+            <p className="text-sm font-semibold text-gray-700">{task.owner || '—'}</p>
+          </div>
+          {/* Deadline — editable date input */}
+          <div className="bg-gray-50 rounded-xl p-3">
+            <p className="text-xs text-gray-400 font-medium mb-1">Deadline</p>
+            <input
+              type="date"
+              defaultValue={toISODate(task.deadline)}
+              onChange={e => onDeadlineChange?.(task, e.target.value)}
+              className="text-sm font-semibold text-gray-700 bg-transparent w-full focus:outline-none focus:ring-2 focus:ring-indigo-300 rounded-lg px-1 -mx-1 cursor-pointer"
+            />
+            {task.deadline && task.deadline !== 'TBD' && task.deadline !== 'Not specified' && (
+              <p className="text-xs text-gray-400 mt-0.5">{task.deadline}</p>
+            )}
+          </div>
+          {/* Priority */}
+          <div className="bg-gray-50 rounded-xl p-3">
+            <p className="text-xs text-gray-400 font-medium mb-0.5">Priority</p>
+            <p className="text-sm font-semibold text-gray-700">{task.priority || '—'}</p>
+          </div>
+          {/* Meeting */}
+          <div className="bg-gray-50 rounded-xl p-3">
+            <p className="text-xs text-gray-400 font-medium mb-0.5">Meeting</p>
+            <p className="text-sm font-semibold text-gray-700 leading-snug" style={{ overflowWrap:'anywhere' }}>
+              {task.meeting_summary ? task.meeting_summary.slice(0, 60) + '…' : '—'}
+            </p>
+          </div>
+        </div>
+
+        {/* Status change */}
+        <div>
+          <p className="text-xs text-gray-400 font-medium mb-2">Update Status</p>
+          <div className="flex gap-2 flex-wrap">
+            {['Pending','In Progress','Done','Cancelled'].map(s => (
+              <button
+                key={s}
+                onClick={() => { onStatusChange(task, s); onClose() }}
+                className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition-all hover:shadow-sm ${
+                  task.status === s
+                    ? 'ring-2 ring-indigo-400 ring-offset-1 ' + statusBadge(s)
+                    : statusBadge(s) + ' opacity-60 hover:opacity-100'
+                }`}
+              >
+                {task.status === s ? '✓ ' : ''}{s}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Close */}
+        <button
+          onClick={onClose}
+          className="w-full py-2 text-sm text-gray-500 hover:text-gray-700 border border-gray-200 rounded-xl transition-colors"
+        >
+          Close
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ── CSV export helper ──────────────────────────────────────
+function exportTasksCSV(tasks, label = 'all-tasks') {
+  const headers = ['Task','Owner','Priority','Deadline','Status','Meeting']
+  const rows = tasks.map(t => [
+    `"${(t.task_name  || '').replace(/"/g, '""')}"`,
+    `"${(t.owner      || '').replace(/"/g, '""')}"`,
+    `"${(t.priority || '').replace(/"/g, '""')}"`,
+    `"${(t.deadline || '').replace(/"/g, '""')}"`,
+    `"${(t.status   || '').replace(/"/g, '""')}"`,
+    `"${(t.meeting_summary || '').slice(0, 80).replace(/"/g, '""')}"`,
+  ])
+  const csv  = [headers.join(','), ...rows.map(r => r.join(','))].join('\n')
+  const slug = label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')
+  const date = new Date().toISOString().slice(0, 10)
+  const blob = new Blob([csv], { type: 'text/csv' })
+  const url  = URL.createObjectURL(blob)
+  const a    = document.createElement('a')
+  a.href     = url
+  a.download = `meetingmind-${slug}-${date}.csv`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
 function TaskBoard({ refreshTrigger, ownerFilter, onClearOwner, statusFilter, onClearStatus }) {
-  const [tasks,   setTasks]   = useState([])
-  const [loading, setLoading] = useState(true)
-  const [filter,  setFilter]  = useState(statusFilter ?? 'all')
-  const [search,  setSearch]  = useState('')
-  const [sortBy,  setSortBy]  = useState('priority') // 'priority' | 'deadline'
+  const [tasks,      setTasks]      = useState([])
+  const [loading,    setLoading]    = useState(true)
+  const [filter,     setFilter]     = useState(statusFilter ?? 'all')
+  const [search,     setSearch]     = useState('')
+  const [sortBy,     setSortBy]     = useState('priority') // 'priority' | 'deadline'
+  const [detailTask, setDetailTask] = useState(null)       // task detail modal
 
   // Sync external statusFilter (e.g. from Analytics nav)
   useEffect(() => {
@@ -652,11 +797,42 @@ function TaskBoard({ refreshTrigger, ownerFilter, onClearOwner, statusFilter, on
       return da.localeCompare(db)
     })
 
+  const handleModalStatusChange = async (task, newStatus) => {
+    setTasks(prev => prev.map(x => x.id === task.id ? { ...x, status: newStatus } : x))
+    try {
+      await fetch(`/api/tasks/${task.id}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: newStatus }),
+      })
+    } catch { load() }
+  }
+
+  const handleModalDeadlineChange = async (task, newDate) => {
+    // Optimistic update — also update detailTask so the modal reflects the new value
+    setTasks(prev => prev.map(x => x.id === task.id ? { ...x, deadline: newDate || 'Not specified' } : x))
+    setDetailTask(prev => prev ? { ...prev, deadline: newDate || 'Not specified' } : prev)
+    try {
+      await fetch(`/api/tasks/${task.id}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deadline: newDate || '' }),
+      })
+    } catch { load() }
+  }
+
   return (
+    <>
+    {detailTask && (
+      <TaskDetailModal
+        task={detailTask}
+        onClose={() => setDetailTask(null)}
+        onStatusChange={handleModalStatusChange}
+        onDeadlineChange={handleModalDeadlineChange}
+      />
+    )}
     <div className="flex flex-col h-full">
       {/* Toolbar */}
       <div className="px-5 py-3 border-b border-gray-100 bg-white shrink-0 space-y-2">
-        {/* Row 1: status filters + refresh */}
+        {/* Row 1: status filters + refresh + export */}
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-1.5 flex-wrap">
             {ownerFilter && (
@@ -682,12 +858,33 @@ function TaskBoard({ refreshTrigger, ownerFilter, onClearOwner, statusFilter, on
               </button>
             ))}
           </div>
-          <button onClick={load} className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors" title="Refresh">
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-            </svg>
-          </button>
+          <div className="flex items-center gap-1 shrink-0">
+            {/* CSV Export */}
+            <button
+              onClick={() => {
+                const parts = []
+                if (filter && filter !== 'all') parts.push(filter.toLowerCase().replace(' ', '-'))
+                else parts.push('all-tasks')
+                if (ownerFilter) parts.push(ownerFilter.toLowerCase().replace(/\s+/g, '-'))
+                if (search.trim()) parts.push('search-' + search.trim().toLowerCase().replace(/\s+/g, '-').slice(0, 20))
+                exportTasksCSV(visible, parts.join('-'))
+              }}
+              title="Export visible tasks to CSV"
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-gray-500 hover:text-emerald-700 hover:bg-emerald-50 border border-gray-200 hover:border-emerald-200 transition-all"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+              </svg>
+              CSV
+            </button>
+            {/* Refresh */}
+            <button onClick={load} className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors" title="Refresh">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                  d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+            </button>
+          </div>
         </div>
         {/* Row 2: search + sort */}
         <div className="flex items-center gap-2">
@@ -754,14 +951,16 @@ function TaskBoard({ refreshTrigger, ownerFilter, onClearOwner, statusFilter, on
                 return (
                   <tr
                     key={t.id || idx}
-                    className={`border-b border-gray-50 transition-colors ${
-                      isDone ? 'bg-gray-50/50 hover:bg-gray-100/50' : 'hover:bg-indigo-50/30'
+                    onClick={() => setDetailTask(t)}
+                    className={`border-b border-gray-50 transition-colors cursor-pointer ${
+                      isDone ? 'bg-gray-50/50 hover:bg-gray-100/50' : 'hover:bg-indigo-50/40'
                     }`}
                   >
                     <td className="py-3 px-5 w-[40%]">
                       <span className={`block font-medium leading-snug ${isDone ? 'line-through text-gray-400' : 'text-gray-800'}`}>
                         {t.task_name}
                       </span>
+                      <span className="text-xs text-gray-400 mt-0.5 hidden group-hover:block">Click for details</span>
                     </td>
                     <td className="py-3 px-3 whitespace-nowrap">
                       <span className={`text-xs font-medium ${isDone ? 'text-gray-400' : 'text-gray-600'}`}>
@@ -773,12 +972,41 @@ function TaskBoard({ refreshTrigger, ownerFilter, onClearOwner, statusFilter, on
                         {t.priority || '—'}
                       </span>
                     </td>
-                    <td className="py-3 px-3 whitespace-nowrap">
-                      <span className={`text-xs ${isDone ? 'text-gray-400' : 'text-gray-500'}`}>
-                        {fmtDate(t.deadline)}
-                      </span>
+                    <td className="py-3 px-3 whitespace-nowrap" onClick={e => e.stopPropagation()}>
+                      <div className="relative group/dl inline-flex items-center gap-1">
+                        <span className={`text-xs ${isDone ? 'text-gray-400' : isOverdue(t) ? 'text-red-600 font-semibold' : 'text-gray-500'}`}>
+                          {fmtDate(t.deadline) || <span className="text-gray-300 italic">No date</span>}
+                        </span>
+                        {/* Calendar edit icon — always visible on hover */}
+                        <label
+                          title="Edit deadline"
+                          className="opacity-0 group-hover/dl:opacity-100 transition-opacity cursor-pointer text-gray-400 hover:text-indigo-500"
+                        >
+                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                            <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+                            <line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/>
+                            <line x1="3" y1="10" x2="21" y2="10"/>
+                          </svg>
+                          <input
+                            type="date"
+                            className="absolute inset-0 opacity-0 cursor-pointer w-full"
+                            value={toISODate(t.deadline)}
+                            onChange={async (e) => {
+                              const newDate = e.target.value // YYYY-MM-DD or ''
+                              setTasks(prev => prev.map(x => x.id === t.id ? { ...x, deadline: newDate || 'Not specified' } : x))
+                              try {
+                                await fetch(`/api/tasks/${t.id}`, {
+                                  method: 'PATCH',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ deadline: newDate || '' }),
+                                })
+                              } catch { load() }
+                            }}
+                          />
+                        </label>
+                      </div>
                     </td>
-                    <td className="py-3 px-3">
+                    <td className="py-3 px-3" onClick={e => e.stopPropagation()}>
                       <div className="relative inline-flex items-center group">
                         <select
                           value={t.status || 'Pending'}
@@ -821,6 +1049,7 @@ function TaskBoard({ refreshTrigger, ownerFilter, onClearOwner, statusFilter, on
         )}
       </div>
     </div>
+    </>
   )
 }
 
@@ -932,6 +1161,11 @@ function StatCard({ label, value, sub, color, icon }) {
   )
 }
 
+// ── Skeleton loader ────────────────────────────────────────
+function Skeleton({ className = '' }) {
+  return <div className={`animate-pulse bg-gray-200 rounded-lg ${className}`} />
+}
+
 function AnalyticsPanel({ onOwnerClick, onTabChange, onTasksNav, onTaskUpdated }) {
   const [data,      setData]      = useState(null)
   const [loading,   setLoading]   = useState(true)
@@ -947,16 +1181,70 @@ function AnalyticsPanel({ onOwnerClick, onTabChange, onTasksNav, onTaskUpdated }
   }
   useEffect(() => reload(), [])
 
+  // ── Skeleton state ──────────────────────────────────────
   if (loading) return (
-    <div className="flex items-center justify-center h-40 text-gray-400 text-sm gap-2">
-      <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
-        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
-      </svg>
-      Loading analytics…
+    <div className="flex flex-col h-full overflow-y-auto px-5 py-5 space-y-5 bg-gray-50">
+      <div className="flex items-center justify-between -mb-2">
+        <Skeleton className="h-3 w-20" />
+        <Skeleton className="h-6 w-6 rounded-full" />
+      </div>
+      {/* Stat card skeletons */}
+      <div className="grid grid-cols-4 gap-3">
+        {[...Array(4)].map((_, i) => (
+          <div key={i} className="bg-white border border-gray-100 rounded-xl p-4 shadow-sm space-y-2">
+            <Skeleton className="h-7 w-12" />
+            <Skeleton className="h-3 w-16" />
+          </div>
+        ))}
+      </div>
+      {/* Ownership bar skeletons */}
+      <div className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm space-y-3">
+        <Skeleton className="h-3 w-28 mb-1" />
+        {[...Array(4)].map((_, i) => (
+          <div key={i} className="space-y-1.5">
+            <div className="flex justify-between">
+              <Skeleton className="h-3 w-20" />
+              <Skeleton className="h-3 w-24" />
+            </div>
+            <Skeleton className={`h-2.5 rounded-full`} style={{ width: `${70 - i * 12}%` }} />
+          </div>
+        ))}
+      </div>
+      {/* Weekly chart skeleton */}
+      <div className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm">
+        <Skeleton className="h-3 w-28 mb-4" />
+        <div className="flex items-end gap-2 h-24">
+          {[60,80,45,90,70,55].map((h, i) => (
+            <div key={i} className="flex-1 flex gap-0.5 items-end h-full">
+              <Skeleton className="flex-1 rounded-t" style={{ height: `${h}%` }} />
+              <Skeleton className="flex-1 rounded-t" style={{ height: `${h * 0.6}%` }} />
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   )
-  if (!data) return null
+
+  // ── Empty state ─────────────────────────────────────────
+  const isEmpty = !data ||
+    ((data.velocity?.total_tasks ?? data.velocity?.velocity?.total_tasks ?? 0) === 0 &&
+     (data.ownership?.owners?.length ?? 0) === 0)
+
+  if (isEmpty) return (
+    <div className="flex flex-col items-center justify-center h-full gap-4 text-gray-400 px-8 text-center">
+      <span className="text-5xl opacity-30">📊</span>
+      <p className="text-base font-semibold text-gray-500">No data yet</p>
+      <p className="text-sm leading-relaxed max-w-xs">
+        Process your first meeting transcript in the chat to see task ownership, trends, and quality scores here.
+      </p>
+      <button
+        onClick={() => onTabChange?.('tasks')}
+        className="mt-1 px-4 py-2 bg-indigo-600 text-white text-xs font-semibold rounded-lg hover:bg-indigo-700 transition-colors"
+      >
+        Go to Tasks
+      </button>
+    </div>
+  )
 
   const velocity    = data.velocity?.velocity ?? data.velocity ?? {}
   const owners      = data.ownership?.owners  ?? []
@@ -966,6 +1254,16 @@ function AnalyticsPanel({ onOwnerClick, onTabChange, onTasksNav, onTaskUpdated }
   const completionPct = velocity.total_tasks
     ? Math.round((velocity.completed_tasks ?? 0) / velocity.total_tasks * 100) : 0
   const COLORS = ['#6366f1','#8b5cf6','#ec4899','#f59e0b','#10b981','#3b82f6','#ef4444']
+
+  // Time saved: each task ~2 min to manually document + meeting summary ~8 min baseline
+  const totalTasks  = velocity.total_tasks ?? 0
+  const timeSavedMin = Math.round(totalTasks * 2 + (velocity.total_meetings ?? 0) * 8)
+  const timeSavedStr = timeSavedMin >= 60
+    ? `${Math.floor(timeSavedMin / 60)}h ${timeSavedMin % 60}m`
+    : `${timeSavedMin}m`
+
+  // Duplicates blocked — sum high_priority_open proxy or read from ownership
+  const duplicatesBlocked = owners.reduce((acc, o) => acc + (o.duplicates_blocked ?? 0), 0)
 
   const markDone = async (task) => {
     setDoneIds(s => new Set([...s, task.id]))
@@ -1020,6 +1318,26 @@ function AnalyticsPanel({ onOwnerClick, onTabChange, onTasksNav, onTaskUpdated }
         ))}
       </div>
 
+      {/* Impact Row — time saved + duplicates blocked */}
+      <div className="grid grid-cols-2 gap-3">
+        <div className="bg-gradient-to-br from-indigo-50 to-indigo-100/60 border border-indigo-200 rounded-xl p-4 shadow-sm">
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-lg">⏱️</span>
+            <span className="text-xs font-bold text-indigo-600 uppercase tracking-wider">Est. Time Saved</span>
+          </div>
+          <p className="text-2xl font-bold text-indigo-700">{timeSavedStr}</p>
+          <p className="text-xs text-indigo-500 mt-0.5">vs. manual note-taking ({totalTasks} tasks × 2 min + {velocity.total_meetings ?? 0} summaries × 8 min)</p>
+        </div>
+        <div className="bg-gradient-to-br from-emerald-50 to-emerald-100/60 border border-emerald-200 rounded-xl p-4 shadow-sm">
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-lg">🛡️</span>
+            <span className="text-xs font-bold text-emerald-600 uppercase tracking-wider">Duplicates Blocked</span>
+          </div>
+          <p className="text-2xl font-bold text-emerald-700">{velocity.duplicates_blocked ?? duplicatesBlocked}</p>
+          <p className="text-xs text-emerald-500 mt-0.5">Semantic deduplication via pgvector · Vertex AI embeddings</p>
+        </div>
+      </div>
+
       {/* Task Ownership — click bar to filter task board */}
       {owners.length > 0 && (
         <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
@@ -1060,14 +1378,23 @@ function AnalyticsPanel({ onOwnerClick, onTabChange, onTasksNav, onTaskUpdated }
             <span className="text-xs text-gray-400">Mark done without using the chat</span>
           </div>
           <div className="space-y-2">
-            {overdueList.slice(0, 8).map(t => (
-              <div key={t.id} className="flex justify-between items-center bg-red-50 rounded-lg px-3 py-2.5 gap-2">
+            {overdueList.slice(0, 8).map(t => {
+              const urgent = t.days_overdue > 7
+              const critical = t.days_overdue > 14
+              return (
+              <div key={t.id} className={`flex justify-between items-center rounded-lg px-3 py-2.5 gap-2 ${
+                critical ? 'bg-red-100' : urgent ? 'bg-red-50' : 'bg-orange-50'
+              }`}>
                 <span className="text-sm text-gray-700 font-medium leading-snug flex-1" style={{ overflowWrap:'anywhere' }}>
                   {t.task_name}
                 </span>
                 <div className="flex items-center gap-2 shrink-0">
                   <span className="text-xs text-gray-500">{t.owner || '?'}</span>
-                  <span className="text-xs bg-red-100 text-red-700 font-semibold px-2 py-0.5 rounded-full whitespace-nowrap">
+                  <span className={`text-xs font-bold px-2 py-0.5 rounded-full whitespace-nowrap ${
+                    critical ? 'bg-red-600 text-white' :
+                    urgent   ? 'bg-red-500 text-white' :
+                               'bg-orange-400 text-white'
+                  }`}>
                     {t.days_overdue}d late
                   </span>
                   <button
@@ -1078,7 +1405,8 @@ function AnalyticsPanel({ onOwnerClick, onTabChange, onTasksNav, onTaskUpdated }
                   </button>
                 </div>
               </div>
-            ))}
+              )
+            })}
           </div>
         </div>
       )}

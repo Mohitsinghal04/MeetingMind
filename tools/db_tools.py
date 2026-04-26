@@ -619,7 +619,7 @@ def get_note_by_id(tool_context: ToolContext, note_id: str) -> dict:
 
 
 def save_memory(tool_context: ToolContext, key: str, value: str) -> dict:
-    """Save a key-value memory item for the current session.
+    """Save a key-value memory item globally (persists across all sessions).
 
     Args:
         tool_context: ADK tool context.
@@ -633,7 +633,8 @@ def save_memory(tool_context: ToolContext, key: str, value: str) -> dict:
         with get_db_connection() as conn:
             cur = conn.cursor()
             memory_id = str(uuid.uuid4())
-            session_id = tool_context.state.get("session_id", "default")
+            # Use a fixed global session so preferences persist across browser sessions
+            global_session = "global_user_preferences"
 
             clean_key = key.lower().replace(" ", "_")
             embedding = get_embedding(f"{clean_key}: {value}")
@@ -644,12 +645,12 @@ def save_memory(tool_context: ToolContext, key: str, value: str) -> dict:
                    DO UPDATE SET value = EXCLUDED.value,
                                  created_at = EXCLUDED.created_at,
                                  embedding = EXCLUDED.embedding""",
-                (memory_id, session_id, clean_key, value, datetime.utcnow(), embedding)
+                (memory_id, global_session, clean_key, value, datetime.utcnow(), embedding)
             )
             conn.commit()
             cur.close()
 
-            logging.info(f"Memory saved: {key} = {value[:50]}")
+            logging.info(f"Memory saved globally: {key} = {value[:50]}")
             return {
                 "status": "success",
                 "key": key,
@@ -663,7 +664,7 @@ def save_memory(tool_context: ToolContext, key: str, value: str) -> dict:
 
 
 def get_memory(tool_context: ToolContext, key: Optional[str] = None) -> dict:
-    """Retrieve memory items for the current session.
+    """Retrieve memory items — searches global preferences first, then current session.
 
     Args:
         tool_context: ADK tool context.
@@ -676,20 +677,26 @@ def get_memory(tool_context: ToolContext, key: Optional[str] = None) -> dict:
         with get_db_connection() as conn:
             cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
             session_id = tool_context.state.get("session_id", "default")
+            global_session = "global_user_preferences"
 
             if key:
+                clean_key = key.lower().replace(" ", "_")
+                # Search global preferences first, then fall back to current session
                 cur.execute(
                     """SELECT key, value, created_at FROM memory
-                       WHERE session_id = %s AND key = %s""",
-                    (session_id, key.lower().replace(" ", "_"))
+                       WHERE key = %s AND session_id IN (%s, %s)
+                       ORDER BY CASE WHEN session_id = %s THEN 0 ELSE 1 END
+                       LIMIT 5""",
+                    (clean_key, global_session, session_id, global_session)
                 )
             else:
+                # Return all global preferences + current session memories (deduped by key)
                 cur.execute(
-                    """SELECT key, value, created_at FROM memory
-                       WHERE session_id = %s
-                       ORDER BY created_at DESC
-                       LIMIT 20""",
-                    (session_id,)
+                    """SELECT DISTINCT ON (key) key, value, created_at FROM memory
+                       WHERE session_id IN (%s, %s)
+                       ORDER BY key, CASE WHEN session_id = %s THEN 0 ELSE 1 END, created_at DESC
+                       LIMIT 30""",
+                    (global_session, session_id, global_session)
                 )
 
             memories = [dict(row) for row in cur.fetchall()]
@@ -705,6 +712,31 @@ def get_memory(tool_context: ToolContext, key: Optional[str] = None) -> dict:
     except Exception as e:
         logging.error(f"Error getting memory: {e}")
         return {"status": "error", "message": str(e), "memories": [], "count": 0}
+
+
+def get_all_memories_as_context() -> str:
+    """Fetch all global memories as a flat string for prompt injection (no LLM tool call needed).
+
+    Returns:
+        Formatted string of all stored preferences and context, or empty string if none.
+    """
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+            cur.execute(
+                """SELECT DISTINCT ON (key) key, value FROM memory
+                   WHERE session_id = 'global_user_preferences'
+                   ORDER BY key, created_at DESC
+                   LIMIT 30"""
+            )
+            rows = cur.fetchall()
+            cur.close()
+        if not rows:
+            return ""
+        lines = [f"- {r['key']}: {r['value']}" for r in rows]
+        return "STORED PREFERENCES & CONTEXT:\n" + "\n".join(lines)
+    except Exception:
+        return ""
 
 
 def list_all_meetings(tool_context: ToolContext, limit: int = 20) -> dict:
