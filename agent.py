@@ -184,6 +184,71 @@ def set_memory_input(tool_context: ToolContext, information: str) -> dict:
     return {"status": "success", "information": information}
 
 
+def assemble_briefing_from_state(tool_context: ToolContext) -> str:
+    """Assemble the final meeting briefing from pipeline state — pure Python, no LLM.
+
+    Reads meeting_summary, prioritized_tasks, and save_schedule_result that the
+    earlier pipeline stages wrote to state, then renders a clean markdown briefing.
+    Calling this tool eliminates the briefing_agent LLM call entirely.
+
+    Returns:
+        Formatted markdown string starting with ✅ **Meeting Processed Successfully**.
+    """
+    state   = tool_context.state
+    summary = (state.get("meeting_summary") or "").strip()
+    tasks   = (state.get("prioritized_tasks") or "").strip()
+    # save_and_schedule_agent uses lowercase key; guard against both casings
+    save_result = (
+        state.get("save_schedule_result") or
+        state.get("SAVE_SCHEDULE_RESULT") or
+        ""
+    ).strip()
+
+    briefing = (
+        "✅ **Meeting Processed Successfully**\n\n"
+        "📋 **Summary:**\n"
+        f"{summary}\n\n"
+        "✅ **Action Items:**\n"
+        f"{tasks}\n\n"
+        "💾 **System Actions:**\n"
+        f"{save_result}\n"
+        "• Notes saved to knowledge base\n\n"
+        "📊 **Pipeline:** 4 agents · Tasks + Calendar + Notes + Google Workspace MCP\n\n"
+        "---\n"
+        "✨ **Try:** \"What tasks are pending?\" · \"Create a doc for this meeting\" · \"Mark [task] as done\""
+    )
+    tool_context.state["final_briefing"] = briefing
+    return briefing
+
+
+def store_memory_direct(tool_context: ToolContext) -> str:
+    """Read memory_input from state, persist it to DB, and return confirmation — no LLM needed.
+
+    Called directly by root_agent for INTENT D (STORE), bypassing the
+    memory_store_agent LLM call entirely.
+
+    Returns:
+        Human-readable confirmation string.
+    """
+    import re as _re
+    info = (tool_context.state.get("memory_input") or "").strip()
+    if not info:
+        return "⚠️ Nothing to remember — no information was provided."
+
+    # Build a readable snake_case key from the first 4 meaningful words
+    _skip = {"i", "a", "an", "the", "to", "that", "this", "is", "are", "was",
+             "remember", "note", "keep", "please", "in", "mind", "store", "save"}
+    words = _re.sub(r"[^a-zA-Z0-9 ]", "", info).split()
+    key_words = [w.lower() for w in words if w.lower() not in _skip][:4]
+    key = ("_".join(key_words) or "user_preference")[:60]
+
+    result = save_memory(tool_context, key, info)
+    if result.get("status") == "success":
+        preview = info if len(info) <= 70 else info[:67] + "…"
+        return f"✅ Got it! I'll remember that {preview}"
+    return f"⚠️ Couldn't save that right now: {result.get('message', 'unknown error')}"
+
+
 def save_full_analysis(
     tool_context: ToolContext,
     meeting_title: str,
@@ -325,33 +390,27 @@ Output a brief confirmation: how many tasks saved, how many calendar events crea
 notes_agent = Agent(
     name="notes_agent",
     model=model_name,
-    description="Searches for related past notes and saves the current meeting as a new note.",
+    description="Searches related past notes, saves the current meeting note, then assembles the final briefing.",
     instruction="""
-You are a knowledge base manager.
-
-Do both of these tasks:
-
-1. Search for related past notes:
-   - Extract 2-3 key topics from MEETING_SUMMARY
-   - Use search_related_notes for each topic
-   - Collect any relevant past notes found
-
-2. Save the current meeting:
-   - Use save_meeting_note with a descriptive title and the full MEETING_SUMMARY as content
+You are a knowledge base manager. Complete THREE tasks in order:
 
 MEETING_SUMMARY:
 {meeting_summary}
 
-Return a JSON object:
-{
-  "related_notes": [{"title": "...", "relevance": "...", "date": "..."}],
-  "note_saved": true,
-  "note_title": "...",
-  "search_topics": [...]
-}
+━━━ TASK 1: Search related past notes ━━━
+Extract 2-3 key topics from MEETING_SUMMARY.
+Call search_related_notes for each topic to find relevant past notes.
+
+━━━ TASK 2: Save the current meeting note ━━━
+Call save_meeting_note with a short descriptive title and the full MEETING_SUMMARY as content.
+
+━━━ TASK 3: Assemble final briefing (MANDATORY LAST STEP) ━━━
+After Tasks 1 and 2 are complete, call assemble_briefing_from_state() immediately.
+Output ONLY the return value of that call verbatim — no other text, no JSON, no wrapping.
+The returned text starts with ✅ **Meeting Processed Successfully** — relay it exactly as-is.
 """,
-    tools=[search_related_notes, save_meeting_note],
-    output_key="notes_result"
+    tools=[search_related_notes, save_meeting_note, assemble_briefing_from_state],
+    output_key="final_briefing"
 )
 
 memory_agent_background = Agent(
@@ -899,12 +958,11 @@ Keep it simple and conversational.
 # The parallel agents above demonstrate the intended architecture.
 transcript_pipeline = SequentialAgent(
     name="transcript_pipeline",
-    description="4-agent pipeline: analysis → save+schedule → notes → brief",
+    description="3-agent pipeline: analysis → save+schedule → notes+briefing",
     sub_agents=[
         analysis_agent,           # LLM call 1: summarise + extract tasks + save meeting to DB
         save_and_schedule_agent,  # LLM call 2: save tasks to DB + create calendar events
-        notes_agent,              # LLM call 3: save meeting note + search related past notes
-        briefing_agent,           # LLM call 4: assemble final markdown + create Google Doc
+        notes_agent,              # LLM call 3: save note + search related notes + assemble briefing (Python tool, no extra LLM)
     ]
 )
 
@@ -939,7 +997,7 @@ INTENT DETECTION — TWO-PASS CLASSIFICATION
 PASS 1 — KEYWORD TRIGGERS (High Confidence):
 
 1. If message contains ["remember", "note that", "keep in mind", "store", "save this"]:
-   → INTENT D (STORE) - call set_memory_input immediately
+   → INTENT D (STORE) - call set_memory_input(information=<text>) then call store_memory_direct() and output the result — NO sub-agent needed
 
 2. If message contains ["mark", "mark as", "update status", "schedule", "set to", "complete"]:
    → INTENT C (COMMAND) - call set_user_command immediately
@@ -950,48 +1008,10 @@ PASS 1 — KEYWORD TRIGGERS (High Confidence):
 4. If message length > 500 characters AND contains ["meeting", "discussed", "action items", "attendees", "decisions", "agenda"]:
    → INTENT A (TRANSCRIPT) - call save_transcript_to_state immediately
 
-PASS 2 — LLM CLASSIFICATION (If No Keyword Match):
-Read the message carefully and determine the most likely intent:
-
-INTENT A — TRANSCRIPT
-Long text with discussion, decisions, names, action items.
-→ Step 1: Call save_transcript_to_state tool with the ENTIRE user message as the transcript parameter
-  CRITICAL: Pass the full multi-line text exactly as provided. The function handles escaping.
-→ Step 2: Immediately delegate to the transcript_pipeline sub-agent to process it - DO NOT output text yet
-→ Step 3: Wait for sub-agent to return results
-→ Step 4: Relay the sub-agent's formatted output directly to user (NO parsing, NO modification)
-
-INTENT B — QUESTION
-Asking about stored data, tasks, notes, or memory.
-→ Step 1: Call set_user_query(query=<the question>) - DO NOT output text yet
-→ Step 2: Immediately delegate to the query_agent sub-agent to answer - DO NOT output text yet
-→ Step 3: Relay query_agent's response directly to user (NO modification)
-
-INTENT C — COMMAND
-Wants to take an action (mark done, schedule, update).
-→ Step 1: Call set_user_command(command=<the action>) - DO NOT output text yet
-→ Step 2: Immediately delegate to the execution_agent sub-agent to execute - DO NOT output text yet
-→ Step 3: Relay execution_agent's confirmation directly to user (NO modification)
-
-INTENT D — STORE
-Wants you to remember something for future sessions.
-→ Step 1: Call set_memory_input(information=<what to remember>) - DO NOT output text yet
-→ Step 2: Immediately delegate to the memory_store_agent sub-agent to store - DO NOT output text yet
-→ Step 3: Relay memory_store_agent's confirmation directly to user (NO modification)
-
-INTENT E — ANALYTICS (route as INTENT B / query_agent)
-Asking about trends, ownership, overdue, recurring topics, quality scores.
-Keywords: "who has the most", "overdue", "trending", "recurring", "velocity", "quality", "analytics", "completion rate", "weekly"
-→ Same flow as INTENT B — call set_user_query, delegate to query_agent
-→ query_agent has all analytics tools built-in
-
-INTENT F — WORKSPACE
-Wants to create a Google Doc, search Drive, or send email.
-Keywords: "create a doc", "google doc", "make a document", "search drive", "find in drive", "send email", "email summary"
-→ Step 1: Call set_user_query(query=<the request>) - DO NOT output text yet
-→ Step 2: Immediately delegate to the query_agent sub-agent (it has create_meeting_doc, search_gdrive, send_meeting_summary_email tools)
-→ Step 3: Relay query_agent's response directly to user
-Example: "Create a doc for this meeting" → set_user_query → query_agent calls create_meeting_doc → returns Google Doc URL
+PASS 2 — FALLBACK (If No Keyword Match):
+If the message did not trigger any keyword in PASS 1, do NOT guess the intent.
+Ask one short clarifying question:
+"I want to make sure I help correctly — are you sharing a meeting transcript, asking a question about tasks or meetings, giving me a command to execute, or asking me to remember something?"
 
 ═══════════════════════════════════════════
 CRITICAL: DELEGATION WORKFLOW
@@ -1015,7 +1035,8 @@ CRITICAL: OUTPUT HANDLING - RELAY AS-IS
 ALL sub-agents return pre-formatted, user-ready output. Your ONLY job is to relay it unchanged.
 
 FOR TRANSCRIPT PROCESSING (Intent A):
-The transcript_pipeline's briefing_agent returns beautiful markdown like:
+The transcript_pipeline's notes_agent assembles the final briefing using assemble_briefing_from_state().
+It returns beautiful markdown like:
 "✅ **Meeting Processed Successfully**\n\n📋 **Summary:**\nThe team discussed..."
 → YOUR OUTPUT: Copy that text EXACTLY. Do NOT convert to JSON. Do NOT wrap in code blocks.
 
@@ -1028,8 +1049,9 @@ The execution_agent returns confirmation message.
 → RELAY IT EXACTLY AS-IS.
 
 FOR MEMORY STORAGE (Intent D):
-The memory_store_agent returns confirmation.
-→ RELAY IT EXACTLY AS-IS.
+You handle this directly — no sub-agent needed.
+Call set_memory_input(information=<text>), then call store_memory_direct().
+Output the string returned by store_memory_direct() verbatim.
 
 ═══════════════════════════════════════════
 WRONG OUTPUT BEHAVIORS (DO NOT DO THESE):
@@ -1087,13 +1109,14 @@ I'm an AI productivity assistant powered by **8 specialized agents** and **4 MCP
         save_transcript_to_state,
         set_user_query,
         set_user_command,
-        set_memory_input
+        set_memory_input,
+        store_memory_direct,       # handles INTENT D inline — no extra LLM call
     ],
     sub_agents=[
         transcript_pipeline,
         query_agent,
         execution_agent,
-        memory_store_agent
+        # memory_store_agent removed — root_agent calls store_memory_direct() directly
     ]
 )
 

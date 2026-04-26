@@ -623,6 +623,7 @@ function TaskBoard({ refreshTrigger, ownerFilter, onClearOwner, statusFilter, on
     { id: 'Pending',     label: 'Pending' },
     { id: 'In Progress', label: 'In Progress' },
     { id: 'Done',        label: 'Done' },
+    { id: 'Cancelled',   label: 'Cancelled' },
     { id: 'Overdue',     label: '⏰ Overdue' },
   ]
 
@@ -631,6 +632,7 @@ function TaskBoard({ refreshTrigger, ownerFilter, onClearOwner, statusFilter, on
     Pending:      tasks.filter(t => t.status === 'Pending').length,
     'In Progress':tasks.filter(t => t.status === 'In Progress').length,
     Done:         tasks.filter(t => t.status === 'Done').length,
+    Cancelled:    tasks.filter(t => t.status === 'Cancelled').length,
     Overdue:      tasks.filter(isOverdue).length,
   }
 
@@ -748,7 +750,7 @@ function TaskBoard({ refreshTrigger, ownerFilter, onClearOwner, statusFilter, on
             </thead>
             <tbody>
               {visible.map((t, idx) => {
-                const isDone = t.status === 'Done'
+                const isDone = t.status === 'Done' || t.status === 'Cancelled'
                 return (
                   <tr
                     key={t.id || idx}
@@ -777,25 +779,34 @@ function TaskBoard({ refreshTrigger, ownerFilter, onClearOwner, statusFilter, on
                       </span>
                     </td>
                     <td className="py-3 px-3">
-                      <select
-                        value={t.status || 'Pending'}
-                        onChange={async (e) => {
-                          const newStatus = e.target.value
-                          setTasks(prev => prev.map(x => x.id === t.id ? { ...x, status: newStatus } : x))
-                          try {
-                            await fetch(`/api/tasks/${t.id}`, {
-                              method: 'PATCH',
-                              headers: { 'Content-Type': 'application/json' },
-                              body: JSON.stringify({ status: newStatus }),
-                            })
-                          } catch { load() }
-                        }}
-                        className={`px-2 py-0.5 rounded-md text-xs font-semibold border-0 cursor-pointer appearance-none text-center ${statusBadge(t.status)} focus:outline-none focus:ring-2 focus:ring-indigo-300`}
-                      >
-                        <option value="Pending">Pending</option>
-                        <option value="In Progress">In Progress</option>
-                        <option value="Done">Done</option>
-                      </select>
+                      <div className="relative inline-flex items-center group">
+                        <select
+                          value={t.status || 'Pending'}
+                          onChange={async (e) => {
+                            const newStatus = e.target.value
+                            setTasks(prev => prev.map(x => x.id === t.id ? { ...x, status: newStatus } : x))
+                            try {
+                              await fetch(`/api/tasks/${t.id}`, {
+                                method: 'PATCH',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ status: newStatus }),
+                              })
+                            } catch { load() }
+                          }}
+                          className={`pl-2.5 pr-6 py-1 rounded-full text-xs font-semibold cursor-pointer appearance-none border transition-all
+                            hover:shadow-md hover:brightness-95 focus:outline-none focus:ring-2 focus:ring-indigo-300
+                            ${statusBadge(t.status)}`}
+                        >
+                          <option value="Pending">Pending</option>
+                          <option value="In Progress">In Progress</option>
+                          <option value="Done">Done</option>
+                          <option value="Cancelled">Cancelled</option>
+                        </select>
+                        {/* Chevron — sits inside the badge, non-interactive */}
+                        <svg className="pointer-events-none absolute right-1.5 w-3 h-3 opacity-60" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7"/>
+                        </svg>
+                      </div>
                     </td>
                     <td className="py-3 px-3 pr-5 w-[20%]">
                       <span className="block text-xs text-gray-400 leading-snug">
