@@ -1779,6 +1779,12 @@ function AnalyticsPanel({ onOwnerClick, onTabChange, onTasksNav, onTaskUpdated }
     ? `${Math.floor(timeSavedMin / 60)}h ${timeSavedMin % 60}m`
     : `${timeSavedMin}m`
 
+  // Cost saved: time saved × $150/hr avg knowledge worker rate
+  const costSavedUSD = Math.round((timeSavedMin / 60) * 150)
+  const costSavedStr = costSavedUSD >= 1000
+    ? `$${(costSavedUSD / 1000).toFixed(1)}k`
+    : `$${costSavedUSD}`
+
   // Duplicates blocked — sum high_priority_open proxy or read from ownership
   const duplicatesBlocked = owners.reduce((acc, o) => acc + (o.duplicates_blocked ?? 0), 0)
 
@@ -1836,15 +1842,23 @@ function AnalyticsPanel({ onOwnerClick, onTabChange, onTasksNav, onTaskUpdated }
         ))}
       </div>
 
-      {/* Impact Row — time saved + duplicates blocked */}
-      <div className="grid grid-cols-2 gap-3">
+      {/* Impact Row — time saved + cost saved + duplicates blocked */}
+      <div className="grid grid-cols-3 gap-3">
         <div className="bg-gradient-to-br from-indigo-50 to-indigo-100/60 border border-indigo-200 rounded-xl p-4 shadow-sm">
           <div className="flex items-center gap-2 mb-1">
             <span className="text-lg">⏱️</span>
             <span className="text-xs font-bold text-indigo-600 uppercase tracking-wider">Est. Time Saved</span>
           </div>
           <p className="text-2xl font-bold text-indigo-700">{timeSavedStr}</p>
-          <p className="text-xs text-indigo-500 mt-0.5">vs. manual note-taking ({totalTasks} tasks × 2 min + {velocity.total_meetings ?? 0} summaries × 8 min)</p>
+          <p className="text-xs text-indigo-500 mt-0.5">{totalTasks} tasks × 2 min + {velocity.total_meetings ?? 0} summaries × 8 min</p>
+        </div>
+        <div className="bg-gradient-to-br from-amber-50 to-amber-100/60 border border-amber-200 rounded-xl p-4 shadow-sm">
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-lg">💰</span>
+            <span className="text-xs font-bold text-amber-600 uppercase tracking-wider">Est. Cost Saved</span>
+          </div>
+          <p className="text-2xl font-bold text-amber-700">{costSavedStr}</p>
+          <p className="text-xs text-amber-500 mt-0.5">{timeSavedStr} saved × $150/hr avg knowledge worker rate</p>
         </div>
         <div className="bg-gradient-to-br from-emerald-50 to-emerald-100/60 border border-emerald-200 rounded-xl p-4 shadow-sm">
           <div className="flex items-center gap-2 mb-1">
