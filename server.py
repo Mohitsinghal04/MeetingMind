@@ -41,7 +41,13 @@ from google.adk.sessions import InMemorySessionService
 from google.genai.types import Content, Part
 
 from meetingmind.agent import root_agent
-from meetingmind.tools.db_tools import get_pending_tasks, list_all_meetings
+from meetingmind.tools.db_tools import (
+    get_pending_tasks,
+    list_all_meetings,
+    find_recurring_topics_for_transcript,
+    check_meeting_duplicate,
+    increment_meeting_duplicates_blocked,
+)
 from meetingmind.tools.analytics_tools import (
     get_task_ownership_stats,
     get_overdue_tasks,
@@ -116,7 +122,17 @@ def _collect_llm_agents(agent, _seen: set | None = None) -> list:
 
 def _is_429(exc: Exception) -> bool:
     s = str(exc).lower()
-    return "429" in str(exc) or "resource_exhausted" in s or "quota" in s or "rateerror" in s
+    return (
+        "429" in str(exc)
+        or "resource_exhausted" in s
+        or "quota" in s
+        or "rateerror" in s
+        or "too many requests" in s
+        or "too_many_requests" in s
+        or "rate limit" in s
+        or "rate_limit" in s
+        or "ratelimit" in s
+    )
 
 
 @asynccontextmanager
@@ -284,6 +300,34 @@ async def chat(req: ChatRequest):
                 if getattr(a, "model", None) != _EVAL_MODEL:
                     a.model = _PRIMARY_MODEL
 
+        # ── Pre-pipeline duplicate gate ────────────────────────────
+        # Compare raw transcript text (md5 hash + first-300-chars fallback).
+        # No embedding needed — meetings.embedding stores SUMMARY embeddings,
+        # comparing those against raw transcript would give false low similarity.
+        # Fails open on any error so pipeline always runs if check breaks.
+        if is_transcript:
+            try:
+                duplicate = check_meeting_duplicate(req.message)
+                if duplicate:
+                    increment_meeting_duplicates_blocked(duplicate["meeting_id"])
+                    logger.info(
+                        f"Duplicate transcript blocked — "
+                        f"{duplicate['similarity']}% match to meeting "
+                        f"{duplicate['meeting_id']}"
+                    )
+                    payload = {
+                        "type": "duplicate",
+                        "similarity": duplicate["similarity"],
+                        "original_date": duplicate["created_at"],
+                        "original_snippet": duplicate["summary_snippet"],
+                        "session_id": session_id,
+                    }
+                    yield f"data: {json.dumps(payload)}\n\n"
+                    return  # stop — no pipeline, no meeting save, no doc
+            except Exception as dup_err:
+                logger.warning(f"Pre-pipeline duplicate check failed (non-fatal): {dup_err}")
+                # fail open — continue with full pipeline
+
         response_text_ref = [""]
         agent_task = asyncio.create_task(run_agent())
 
@@ -358,10 +402,48 @@ async def chat(req: ChatRequest):
                 except Exception as doc_err:
                     logger.warning(f"Post-pipeline doc creation failed (non-fatal): {doc_err}")
 
+            # ── Cross-meeting RAG: find recurring topics ──────────────
+            # Runs entirely outside the LLM pipeline — pure pgvector SQL.
+            # find_recurring_topics_for_transcript() fetches the embedding
+            # internally via the pool (pgvector adapter registered) so there
+            # are no text[] → vector cast issues.
+            recurring_topics = []
+            if is_transcript:
+                try:
+                    import psycopg2 as _pg2
+
+                    with _pg2.connect(
+                        host=os.getenv("DB_HOST"),
+                        dbname=os.getenv("DB_NAME"),
+                        user=os.getenv("DB_USER"),
+                        password=os.getenv("DB_PASSWORD"),
+                        port=int(os.getenv("DB_PORT", 5432)),
+                    ) as conn:
+                        cur = conn.cursor()
+                        cur.execute(
+                            "SELECT id FROM meetings ORDER BY created_at DESC LIMIT 1"
+                        )
+                        row = cur.fetchone()
+                        cur.close()
+
+                    if row:
+                        meeting_id_for_rag = str(row[0])
+                        recurring_topics = find_recurring_topics_for_transcript(
+                            new_meeting_id=meeting_id_for_rag,
+                        )
+                        if recurring_topics:
+                            logger.info(
+                                f"Cross-meeting RAG: {len(recurring_topics)} recurring "
+                                f"topic(s) found for meeting {meeting_id_for_rag}"
+                            )
+                except Exception as rag_err:
+                    logger.warning(f"Cross-meeting RAG failed (non-fatal): {rag_err}")
+
             payload = {
                 "type": "response",
                 "response": _clean_response(raw),
                 "session_id": session_id,
+                "recurring_topics": recurring_topics,
             }
 
         yield f"data: {json.dumps(payload)}\n\n"

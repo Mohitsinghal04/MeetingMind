@@ -43,6 +43,13 @@ from .tools.mcp_wrapper import (
     search_notes_mcp as search_notes,
     create_calendar_event_mcp as create_calendar_event,
 )
+# ADK registers tools by function.__name__, not the import alias.
+# Patch __name__ so tools_dict keys match what agent instructions tell the LLM to call.
+save_tasks.__name__           = "save_tasks"
+update_task_status.__name__   = "update_task_status"
+save_note.__name__            = "save_note"
+search_notes.__name__         = "search_notes"
+create_calendar_event.__name__ = "create_calendar_event"
 from .tools.calendar_tools import get_available_slots
 from .tools.task_tools import (
     list_my_tasks,

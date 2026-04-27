@@ -1119,3 +1119,201 @@ def save_quality_score(tool_context: ToolContext, meeting_id: str, scores: dict)
     except Exception as e:
         logging.error(f"save_quality_score error: {e}")
         return {"status": "error", "message": str(e)}
+
+
+def find_recurring_topics_for_transcript(
+    new_meeting_id: str,
+    top_k: int = 3,
+    similarity_threshold: float = 0.78,
+) -> list[dict]:
+    """Search all previous meetings for semantically similar topics.
+
+    Fetches the embedding for new_meeting_id internally using get_db_connection()
+    (which has the pgvector adapter registered), so no serialization issues.
+    Runs AFTER the pipeline completes — zero impact on agents or LLMs.
+
+    Args:
+        new_meeting_id:       UUID of the meeting just processed (excluded from results).
+        top_k:                Max number of similar past meetings to return.
+        similarity_threshold: Minimum cosine similarity to qualify (0–1).
+
+    Returns:
+        List of dicts with keys: meeting_id, summary_snippet, similarity, created_at.
+        Empty list if pgvector unavailable, meeting has no embedding, or no matches.
+    """
+    if not _PGVECTOR_AVAILABLE:
+        return []
+
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+
+            # Step 1: fetch the embedding of the meeting just saved.
+            # get_db_connection() registers the pgvector adapter, so the
+            # vector column comes back as a proper Python list of floats —
+            # no string-splitting or text[] cast issues.
+            cur.execute(
+                "SELECT embedding FROM meetings WHERE id = %s",
+                (new_meeting_id,),
+            )
+            row = cur.fetchone()
+            if not row or row[0] is None:
+                cur.close()
+                return []
+
+            new_embedding = row[0]  # already a list[float] via pgvector adapter
+
+            # Step 2: cosine similarity search against all other meetings
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    summary,
+                    created_at,
+                    1 - (embedding <=> %s::vector) AS similarity
+                FROM meetings
+                WHERE id != %s
+                  AND embedding IS NOT NULL
+                  AND 1 - (embedding <=> %s::vector) >= %s
+                ORDER BY embedding <=> %s::vector
+                LIMIT %s
+                """,
+                (
+                    new_embedding,
+                    new_meeting_id,
+                    new_embedding,
+                    similarity_threshold,
+                    new_embedding,
+                    top_k,
+                ),
+            )
+            rows = cur.fetchall()
+            cur.close()
+
+        results = []
+        for row in rows:
+            mid, summary, created_at, similarity = row
+            snippet = (summary or "")[:120].strip()
+            if snippet and len(snippet) == 120:
+                snippet += "…"
+            results.append(
+                {
+                    "meeting_id": str(mid),
+                    "summary_snippet": snippet,
+                    "similarity": round(float(similarity) * 100),  # percent
+                    "created_at": created_at.strftime("%-d %b %Y") if created_at else "",
+                }
+            )
+
+        return results
+
+    except Exception as e:
+        logging.error(f"find_recurring_topics_for_transcript error: {e}")
+        return []
+
+
+def check_meeting_duplicate(transcript_text: str) -> dict | None:
+    """Check if an identical or near-identical transcript already exists in the DB.
+
+    Two-tier check (no embedding needed — compares stored transcript text):
+
+    Tier 1 — Exact match (md5 hash):
+        PostgreSQL md5(TRIM(transcript)) = md5(TRIM(new_text))
+        Catches character-for-character repastes instantly.
+
+    Tier 2 — Near-exact match (first 300 chars):
+        LEFT(transcript, 300) = LEFT(new_text, 300)
+        Catches repastes with minor whitespace/trailing differences.
+
+    Why not embedding comparison here:
+        meetings.embedding stores the SUMMARY embedding (LLM-generated).
+        Pre-pipeline we only have the raw transcript text — comparing
+        transcript embeddings vs summary embeddings gives false low similarity
+        and never reaches the 0.92 threshold, breaking the check.
+
+    Args:
+        transcript_text: Raw transcript text from the user's message.
+
+    Returns:
+        dict with meeting_id, summary_snippet, similarity, created_at —
+        or None if no duplicate found.
+    """
+    if not transcript_text or not transcript_text.strip():
+        return None
+
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+
+            # Tier 1: exact MD5 match
+            cur.execute(
+                """
+                SELECT id, summary, created_at, 100 AS similarity
+                FROM meetings
+                WHERE transcript IS NOT NULL
+                  AND md5(TRIM(transcript)) = md5(TRIM(%s))
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (transcript_text,),
+            )
+            row = cur.fetchone()
+
+            # Tier 2: first-300-chars match (catches minor whitespace differences)
+            if not row:
+                cur.execute(
+                    """
+                    SELECT id, summary, created_at, 99 AS similarity
+                    FROM meetings
+                    WHERE transcript IS NOT NULL
+                      AND LEFT(TRIM(transcript), 300) = LEFT(TRIM(%s), 300)
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (transcript_text,),
+                )
+                row = cur.fetchone()
+
+            cur.close()
+
+        if not row:
+            return None
+
+        mid, summary, created_at, similarity = row
+        snippet = (summary or "")[:120].strip()
+        if snippet and len(snippet) == 120:
+            snippet += "…"
+        return {
+            "meeting_id": str(mid),
+            "summary_snippet": snippet,
+            "similarity": int(similarity),
+            "created_at": created_at.strftime("%-d %b %Y") if created_at else "",
+        }
+
+    except Exception as e:
+        logging.error(f"check_meeting_duplicate error: {e}")
+        return None  # fail open — let pipeline run if check errors
+
+
+def increment_meeting_duplicates_blocked(meeting_id: str) -> None:
+    """Increment the duplicates_blocked counter on an existing meeting.
+
+    Called when a duplicate transcript is blocked pre-pipeline so the
+    Analytics dashboard accurately reflects total duplicates caught.
+
+    Args:
+        meeting_id: UUID of the original (non-duplicate) meeting.
+    """
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE meetings SET duplicates_blocked = COALESCE(duplicates_blocked, 0) + 1 "
+                "WHERE id = %s",
+                (meeting_id,),
+            )
+            conn.commit()
+            cur.close()
+        logging.info(f"duplicates_blocked incremented for meeting {meeting_id}")
+    except Exception as e:
+        logging.error(f"increment_meeting_duplicates_blocked error: {e}")

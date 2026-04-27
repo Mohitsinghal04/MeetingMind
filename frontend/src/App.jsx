@@ -596,6 +596,7 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
 
 
     try {
+      let recurringTopics = []
       const res = await fetch('/api/chat', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -626,7 +627,17 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
             if (evt.type === 'heartbeat') continue
             if (evt.type === 'error') throw new Error(evt.detail || 'Agent error')
             if (evt.type === 'stage') setPipelineStage(evt.index)
-            if (evt.type === 'response') reply = evt.response || '⚠️ No response.'
+            if (evt.type === 'duplicate') {
+              setMessages(m => [...m, { role: 'duplicate', data: evt, ts: Date.now() }])
+              setLoading(false)
+              setPipelineStage(-1)
+              setIsTranscript(false)
+              return
+            }
+            if (evt.type === 'response') {
+              reply = evt.response || '⚠️ No response.'
+              if (evt.recurring_topics?.length) recurringTopics = evt.recurring_topics
+            }
           } catch (parseErr) {
             if (parseErr.message !== 'Agent error' && !parseErr.message.startsWith('Agent')) continue
             throw parseErr
@@ -643,6 +654,10 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
       }
 
       setMessages(m => [...m, { role: 'assistant', text: reply, ts: Date.now() }])
+
+      if (recurringTopics.length > 0) {
+        setMessages(m => [...m, { role: 'recurring', topics: recurringTopics, ts: Date.now() }])
+      }
 
       if (isProcessed) {
         onTranscriptProcessed?.()
@@ -704,6 +719,60 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
       {/* Messages */}
       <div className="flex-1 overflow-y-auto overflow-x-hidden px-4 py-4 space-y-4 bg-gray-50">
         {messages.map((m, i) => {
+          // Duplicate meeting blocked card
+          if (m.role === 'duplicate') {
+            const d = m.data || {}
+            return (
+              <div key={i} className="flex justify-start items-start gap-2">
+                <div className="w-7 h-7 rounded-full bg-red-100 flex items-center justify-center text-sm mr-0 mt-0.5 shrink-0">🚫</div>
+                <div className="max-w-[92%] min-w-0 bg-red-50 border border-red-200 rounded-2xl rounded-bl-none px-4 py-3 shadow-sm">
+                  <p className="text-xs font-bold text-red-700 uppercase tracking-wider mb-1">
+                    Duplicate Meeting Blocked
+                  </p>
+                  <p className="text-sm text-red-600 mb-3">
+                    This transcript is <span className="font-bold">{d.similarity}% identical</span> to a meeting already processed on <span className="font-semibold">{d.original_date}</span>. Skipped save, calendar event, and doc creation.
+                  </p>
+                  {d.original_snippet && (
+                    <div className="bg-white border border-red-100 rounded-lg px-3 py-2 mb-2">
+                      <p className="text-[10px] font-semibold text-red-400 uppercase tracking-wider mb-1">Original meeting</p>
+                      <p className="text-xs text-gray-600 leading-snug">{d.original_snippet}</p>
+                    </div>
+                  )}
+                  <p className="text-[10px] text-red-400 italic">duplicates_blocked counter incremented · pgvector similarity ≥ 92%</p>
+                </div>
+              </div>
+            )
+          }
+
+          // Recurring topic alert — cross-meeting RAG result
+          if (m.role === 'recurring') {
+            return (
+              <div key={i} className="flex justify-start items-start gap-2">
+                <div className="w-7 h-7 rounded-full bg-amber-100 flex items-center justify-center text-sm mr-0 mt-0.5 shrink-0">⚠️</div>
+                <div className="max-w-[92%] min-w-0 bg-amber-50 border border-amber-200 rounded-2xl rounded-bl-none px-4 py-3 shadow-sm">
+                  <p className="text-xs font-bold text-amber-700 uppercase tracking-wider mb-2">
+                    Recurring Topic Detected
+                  </p>
+                  <p className="text-xs text-amber-600 mb-3">
+                    This topic appeared in {m.topics.length} previous meeting{m.topics.length > 1 ? 's' : ''} — it may be an unresolved systemic issue.
+                  </p>
+                  <div className="space-y-2">
+                    {m.topics.map((t, ti) => (
+                      <div key={ti} className="bg-white border border-amber-100 rounded-lg px-3 py-2">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-[10px] font-semibold text-amber-500 uppercase tracking-wider">{t.created_at}</span>
+                          <span className="text-[10px] font-bold text-amber-600 bg-amber-100 rounded-full px-2 py-0.5">{t.similarity}% match</span>
+                        </div>
+                        <p className="text-xs text-gray-600 leading-snug">{t.summary_snippet}</p>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-amber-400 mt-2 italic">Powered by pgvector semantic search</p>
+                </div>
+              </div>
+            )
+          }
+
           // Quality scorecard message type
           if (m.role === 'quality') {
             return (
@@ -1412,7 +1481,7 @@ function TaskBoard({ refreshTrigger, ownerFilter, onClearOwner, statusFilter, on
 
 // ── Meetings Panel ─────────────────────────────────────────
 
-function MeetingsPanel() {
+function MeetingsPanel({ refreshTrigger }) {
   const [meetings,      setMeetings]      = useState([])
   const [taskMap,       setTaskMap]       = useState({})   // meeting_id → {total, done}
   const [tasksByMeeting,setTasksByMeeting]= useState({})   // meeting_id → task[]
@@ -1442,7 +1511,7 @@ function MeetingsPanel() {
       setTaskMap(map)
       setTasksByMeeting(byMeeting)
     }).catch(console.error).finally(() => setLoading(false))
-  }, [])
+  }, [refreshTrigger])
 
   const fmt = (iso) => iso
     ? new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
@@ -2210,7 +2279,7 @@ export default function App() {
         {/* Tab content */}
         <div className="flex-1 overflow-hidden">
           {tab === 'tasks'     && <TaskBoard     refreshTrigger={refreshTrigger} ownerFilter={ownerFilter} onClearOwner={() => setOwnerFilter(null)} statusFilter={statusFilter} onClearStatus={() => setStatusFilter('all')} onCountsChange={(counts) => setTabCounts(prev => ({ ...prev, ...counts }))} />}
-          {tab === 'meetings'  && <MeetingsPanel />}
+          {tab === 'meetings'  && <MeetingsPanel refreshTrigger={refreshTrigger} />}
           {tab === 'analytics' && <AnalyticsPanel onOwnerClick={handleOwnerClick} onTabChange={setTab} onTasksNav={handleTasksNav} onTaskUpdated={() => setRefreshTrigger(r => r + 1)} />}
           {tab === 'docs'      && <DocsPanel      refreshTrigger={refreshTrigger} />}
         </div>
