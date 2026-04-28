@@ -369,3 +369,93 @@ def get_latest_quality_scores(tool_context: ToolContext, limit: int = 5) -> dict
     except Exception as e:
         logging.error(f"get_latest_quality_scores error: {e}")
         return {"status": "error", "message": str(e), "quality_scores": []}
+
+
+def get_meeting_debt(tool_context=None) -> dict:
+    """Find recurring unresolved topics and calculate their cost of indecision.
+
+    Uses pgvector self-join to cluster meetings by semantic similarity (≥ 0.78).
+    For each cluster, the EARLIEST meeting is the 'root' (first time discussed).
+    Subsequent similar meetings = unresolved repetitions = meeting debt.
+
+    Cost model: 5 attendees × 45 min × $75/hr = $281 per meeting occurrence.
+
+    Returns:
+        dict with list of debt items (topic, occurrences, cost) and total debt.
+    """
+    COST_PER_MEETING = 281   # 5 attendees × 45 min × $75/hr
+    SIMILARITY_THRESHOLD = 0.78
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+
+            # Self-join: for each meeting, count how many LATER meetings
+            # discuss the same topic (similarity ≥ 0.78).
+            # Using created_at >= m.created_at ensures m is the first occurrence
+            # so we don't double-count clusters.
+            cur.execute(
+                """
+                SELECT
+                    m.id,
+                    m.summary,
+                    m.created_at,
+                    COUNT(other.id) + 1          AS total_occurrences,
+                    MAX(other.created_at)         AS last_discussed
+                FROM meetings m
+                LEFT JOIN meetings other
+                    ON other.id != m.id
+                    AND other.embedding IS NOT NULL
+                    AND 1 - (m.embedding <=> other.embedding) >= %s
+                    AND other.created_at >= m.created_at
+                WHERE m.embedding IS NOT NULL
+                GROUP BY m.id, m.summary, m.created_at
+                HAVING COUNT(other.id) >= 1
+                ORDER BY COUNT(other.id) DESC, m.created_at ASC
+                LIMIT 5
+                """,
+                (SIMILARITY_THRESHOLD,),
+            )
+            rows = cur.fetchall()
+            cur.close()
+
+        if not rows:
+            return {
+                "status": "success",
+                "debt_items": [],
+                "total_debt_usd": 0,
+                "message": "No recurring unresolved topics found.",
+            }
+
+        debt_items = []
+        total_debt = 0
+        for row in rows:
+            mid, summary, first_seen, occurrences, last_seen = row
+            snippet = (summary or "")[:100].strip()
+            if len(snippet) == 100:
+                snippet += "…"
+            # Extract a short topic label from the summary (first sentence)
+            topic = snippet.split(".")[0].strip() if snippet else "Unknown topic"
+            cost = int(occurrences) * COST_PER_MEETING
+            total_debt += cost
+            debt_items.append(
+                {
+                    "meeting_id": str(mid),
+                    "topic": topic,
+                    "summary_snippet": snippet,
+                    "occurrences": int(occurrences),
+                    "cost_usd": cost,
+                    "first_discussed": first_seen.strftime("%-d %b %Y") if first_seen else "",
+                    "last_discussed": last_seen.strftime("%-d %b %Y") if last_seen else "",
+                }
+            )
+
+        return {
+            "status": "success",
+            "debt_items": debt_items,
+            "total_debt_usd": total_debt,
+            "count": len(debt_items),
+        }
+
+    except Exception as e:
+        logging.error(f"get_meeting_debt error: {e}")
+        return {"status": "error", "message": str(e), "debt_items": [], "total_debt_usd": 0}

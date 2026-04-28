@@ -495,25 +495,29 @@ MEETING SUMMARY:
 PRIORITIZED TASKS:
 {prioritized_tasks}
 
+MEETING ID: {current_meeting_id}
+
 Score each dimension 1–5 (5 = excellent):
 - summary_quality: Does the summary capture all key decisions, owners, and outcomes?
 - task_extraction_completeness: Were all action items from the transcript captured?
 - priority_accuracy: Are High/Medium/Low priorities correctly assigned relative to impact?
 - owner_attribution: Are tasks assigned to the correct named owners from the transcript?
 
-Output ONLY valid JSON (no markdown, no explanation):
-{
-  "summary_quality": <1-5>,
-  "task_extraction_completeness": <1-5>,
-  "priority_accuracy": <1-5>,
-  "owner_attribution": <1-5>,
-  "overall_score": <1.0-5.0 weighted average>,
-  "flags": ["specific issue if any"],
-  "recommendations": ["one concrete improvement if any"]
-}
+YOUR ONLY JOB: Call save_quality_score exactly once with these parameters:
+- meeting_id: the MEETING ID shown above (copy it exactly)
+- scores: a dict containing your integer/float scores, e.g.
+  {
+    "summary_quality": 4,
+    "task_extraction_completeness": 5,
+    "priority_accuracy": 4,
+    "owner_attribution": 5,
+    "overall_score": 4.5,
+    "flags": ["any specific issues found, or empty list"],
+    "recommendations": ["one concrete improvement, or empty list"]
+  }
 
-Then call save_quality_score with the meeting_id from state and the scores.
-The meeting_id is in state as current_meeting_id: {current_meeting_id}
+Do NOT output any JSON text. Do NOT use print(). Just call save_quality_score as a tool.
+After the tool call succeeds, output only: "Quality evaluation saved."
 """,
     tools=[save_quality_score],
     output_key="evaluation_result",

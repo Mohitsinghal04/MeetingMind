@@ -55,6 +55,7 @@ from meetingmind.tools.analytics_tools import (
     get_recurring_topics,
     get_task_completion_trends,
     get_latest_quality_scores,
+    get_meeting_debt,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -120,19 +121,40 @@ def _collect_llm_agents(agent, _seen: set | None = None) -> list:
     return result
 
 
+_429_KEYWORDS = (
+    "429",
+    "resource_exhausted",
+    "quota",
+    "rateerror",
+    "too many requests",
+    "too_many_requests",
+    "rate limit",
+    "rate_limit",
+    "ratelimit",
+)
+
+
+def _is_429_str(text: str) -> bool:
+    """Check a plain string for 429/rate-limit signals."""
+    s = text.lower()
+    return any(k in s for k in _429_KEYWORDS)
+
+
 def _is_429(exc: Exception) -> bool:
-    s = str(exc).lower()
-    return (
-        "429" in str(exc)
-        or "resource_exhausted" in s
-        or "quota" in s
-        or "rateerror" in s
-        or "too many requests" in s
-        or "too_many_requests" in s
-        or "rate limit" in s
-        or "rate_limit" in s
-        or "ratelimit" in s
-    )
+    """Check an exception and its full cause chain for 429/rate-limit signals.
+
+    Walks __cause__ and __context__ so wrapped exceptions
+    (e.g. httpx.HTTPStatusError inside a google.api_core exception)
+    are caught correctly.
+    """
+    seen: set = set()
+    current: Exception | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if _is_429_str(str(current)):
+            return True
+        current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
+    return False
 
 
 @asynccontextmanager
@@ -194,7 +216,7 @@ def _clean_response(text: str) -> str:
     # 3. Strip multi-line JSON objects/arrays anywhere in the text
     text = _re.sub(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", "", text, flags=_re.DOTALL)
 
-    # 4. Strip leftover lines that are pure JSON fragments or the bare word "json"
+    # 4. Strip leftover lines that are pure JSON fragments, bare "json", or stray tool-call text
     lines = text.splitlines()
     clean = []
     for line in lines:
@@ -207,6 +229,13 @@ def _clean_response(text: str) -> str:
         if stripped.startswith("[") and not _re.match(r"^\[.+\]\(", stripped):
             continue
         if stripped.startswith(('"related', '"note', '"search')):
+            continue
+        # Strip stray Python-style tool-call lines that flash-lite sometimes emits
+        if _re.match(r"^print\s*\(", stripped):
+            continue
+        if _re.match(r"^save_quality_score\s*\(", stripped):
+            continue
+        if _re.match(r"^save_tasks\s*\(", stripped):
             continue
         clean.append(line)
 
@@ -254,11 +283,25 @@ async def chat(req: ChatRequest):
         error_holder: list = []
 
         async def run_agent():
-            """Run the agent with automatic model fallback on 429."""
+            """Run the agent with automatic model fallback on 429.
+
+            Three-layer 429 detection:
+            1. Exception raised from run_async (most common).
+            2. Exception chain — walks __cause__ / __context__ for wrapped errors.
+            3. Response text — ADK sometimes swallows the 429 and puts it in the
+               content rather than raising; we detect that and force a retry.
+
+            On each retry a fresh session is created so the fallback model gets
+            a clean conversation state (no duplicate user messages from the
+            failed first attempt).
+            """
             llm_agents = _collect_llm_agents(root_agent)
 
             async with _model_lock:
                 tried = []
+                # Use a per-attempt session id so retries start clean.
+                attempt_session_id = session_id
+
                 for model in _FALLBACK_MODELS:
                     tried.append(model)
 
@@ -268,23 +311,52 @@ async def chat(req: ChatRequest):
                             a.model = model
 
                     if model != _PRIMARY_MODEL:
-                        logger.warning(f"⚡ 429 quota hit — retrying with fallback model: {model}")
+                        logger.warning(
+                            f"⚡ 429 quota hit — retrying with fallback model: {model} "
+                            f"(session {attempt_session_id})"
+                        )
 
                     try:
                         async for event in _runner.run_async(
                             user_id=user_id,
-                            session_id=session_id,
+                            session_id=attempt_session_id,
                             new_message=content,
                         ):
                             if event.is_final_response() and event.content:
                                 for part in event.content.parts or []:
                                     if hasattr(part, "text") and part.text:
                                         response_text_ref[0] += part.text
-                        return  # success — stop trying further models
+
+                        # Bug 1 fix: ADK can swallow a 429 and return it as
+                        # response text instead of raising. Detect and retry.
+                        if _is_429_str(response_text_ref[0]):
+                            logger.warning(
+                                f"⚡ 429 detected in response content "
+                                f"(model={model}) — retrying with fallback"
+                            )
+                            response_text_ref[0] = ""
+                            raise RuntimeError("429 in response content")
+
+                        return  # genuine success — stop trying further models
 
                     except Exception as exc:
                         if _is_429(exc):
+                            # Bug 2 fix: create a fresh session for the next
+                            # attempt so the fallback model doesn't see the
+                            # partial/duplicate conversation from this attempt.
+                            attempt_session_id = str(uuid.uuid4())
+                            try:
+                                coro = _session_service.create_session(
+                                    app_name="meetingmind",
+                                    user_id=user_id,
+                                    session_id=attempt_session_id,
+                                )
+                                if asyncio.iscoroutine(coro):
+                                    await coro
+                            except Exception:
+                                pass  # session creation failure is non-fatal
                             continue  # try next fallback model immediately
+
                         # Non-429 error — surface it directly
                         error_holder.append(str(exc))
                         return
@@ -550,6 +622,13 @@ async def get_analytics():
 async def get_quality():
     ctx = _MockCtx()
     return _serialize(get_latest_quality_scores(ctx, limit=10))
+
+
+@app.get("/api/debt")
+async def get_debt():
+    """Return recurring unresolved topics and their estimated cost of indecision."""
+    ctx = _MockCtx()
+    return _serialize(get_meeting_debt(ctx))
 
 
 @app.get("/api/docs")

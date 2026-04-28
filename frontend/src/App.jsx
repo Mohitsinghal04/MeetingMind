@@ -660,6 +660,7 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
       }
 
       if (isProcessed) {
+        setMessages(m => [...m, { role: 'chips', ts: Date.now() }])
         onTranscriptProcessed?.()
         // Fetch quality score — evaluation_agent runs in parallel with notes_agent (~5-6s)
         // No LLM calls — just a DB read each time. Retry at 3s and 6s, then give up silently.
@@ -719,6 +720,30 @@ function ChatPanel({ onTranscriptProcessed, onTaskUpdated }) {
       {/* Messages */}
       <div className="flex-1 overflow-y-auto overflow-x-hidden px-4 py-4 space-y-4 bg-gray-50">
         {messages.map((m, i) => {
+          // Quick action chips — shown after transcript is processed
+          if (m.role === 'chips') {
+            const CHIPS = [
+              { label: '🔍 What needs my attention?', query: 'What needs my attention?' },
+              { label: '⏰ Show overdue tasks',        query: 'Show overdue tasks' },
+              { label: '📊 Meeting debt report',       query: 'Show meeting debt report' },
+            ]
+            return (
+              <div key={i} className="flex justify-start items-start gap-2 pl-9">
+                <div className="flex flex-wrap gap-2">
+                  {CHIPS.map((chip) => (
+                    <button
+                      key={chip.label}
+                      onClick={() => send(chip.query)}
+                      className="text-xs px-3 py-1.5 rounded-full border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 hover:border-indigo-300 transition-colors font-medium shadow-sm"
+                    >
+                      {chip.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )
+          }
+
           // Duplicate meeting blocked card
           if (m.role === 'duplicate') {
             const d = m.data || {}
@@ -1747,7 +1772,8 @@ function AnalyticsPanel({ onOwnerClick, onTabChange, onTasksNav, onTaskUpdated }
   const [loading,     setLoading]     = useState(true)
   const [doneIds,     setDoneIds]     = useState(new Set())
   const [spinning,    setSpinning]    = useState(false)
-  const [avgQuality,  setAvgQuality]  = useState(null)  // avg overall_score across all runs
+  const [avgQuality,  setAvgQuality]  = useState(null)
+  const [debtData,    setDebtData]    = useState(null)
 
   const reload = (manual = false) => {
     if (manual) setSpinning(true)
@@ -1755,13 +1781,15 @@ function AnalyticsPanel({ onOwnerClick, onTabChange, onTasksNav, onTaskUpdated }
     Promise.all([
       fetch('/api/analytics').then(r => r.json()),
       fetch('/api/quality').then(r => r.json()).catch(() => null),
-    ]).then(([analytics, quality]) => {
+      fetch('/api/debt').then(r => r.json()).catch(() => null),
+    ]).then(([analytics, quality, debt]) => {
       setData(analytics)
       const scores = quality?.quality_scores ?? []
       if (scores.length > 0) {
         const avg = scores.reduce((s, q) => s + (q.overall_score ?? 0), 0) / scores.length
         setAvgQuality(avg.toFixed(1))
       }
+      if (debt?.debt_items?.length > 0) setDebtData(debt)
     }).catch(console.error)
       .finally(() => { setLoading(false); setSpinning(false) })
   }
@@ -1938,6 +1966,49 @@ function AnalyticsPanel({ onOwnerClick, onTabChange, onTasksNav, onTaskUpdated }
           <p className="text-xs text-emerald-500 mt-0.5">Semantic deduplication via pgvector · Vertex AI embeddings</p>
         </div>
       </div>
+
+      {/* Meeting Debt Report */}
+      {debtData && debtData.debt_items?.length > 0 && (() => {
+        const totalStr = debtData.total_debt_usd >= 1000
+          ? `$${(debtData.total_debt_usd / 1000).toFixed(1)}k`
+          : `$${debtData.total_debt_usd}`
+        return (
+          <div className="bg-gradient-to-br from-red-50 to-orange-50 border border-red-200 rounded-xl p-4 shadow-sm mb-4">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <span className="text-lg">💸</span>
+                <span className="text-sm font-bold text-red-700 uppercase tracking-wider">Meeting Debt Report</span>
+              </div>
+              <div className="text-right">
+                <p className="text-2xl font-bold text-red-700">{totalStr}</p>
+                <p className="text-[10px] text-red-400">estimated cost of indecision</p>
+              </div>
+            </div>
+            <p className="text-xs text-red-600 mb-3">
+              These topics keep resurfacing without resolution — each repetition wastes time and money.
+            </p>
+            <div className="space-y-2">
+              {debtData.debt_items.map((item, idx) => (
+                <div key={idx} className="bg-white border border-red-100 rounded-lg px-3 py-2">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-semibold text-gray-700 leading-snug line-clamp-2">{item.topic}</p>
+                      <p className="text-[10px] text-gray-400 mt-0.5">
+                        First raised {item.first_discussed} · discussed {item.occurrences}× · 5 attendees × 45 min × $75/hr
+                      </p>
+                    </div>
+                    <div className="shrink-0 text-right">
+                      <p className="text-sm font-bold text-red-600">${item.cost_usd.toLocaleString()}</p>
+                      <p className="text-[10px] text-red-400">{item.occurrences} meetings</p>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <p className="text-[10px] text-red-400 mt-2 italic">Powered by pgvector semantic clustering · similarity ≥ 78%</p>
+          </div>
+        )
+      })()}
 
       {/* Smart Insights */}
       {(() => {
