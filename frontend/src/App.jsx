@@ -91,7 +91,7 @@ const meetingTitle = (summary) => {
 // ── Meeting Briefing Parser + Card ────────────────────────────────────────────
 
 function parseBriefing(text) {
-  if (!text?.includes('✅ Meeting Processed Successfully')) return null
+  if (!text?.includes('Meeting Processed Successfully')) return null
 
   const get = (pattern) => { const m = text.match(pattern); return m?.[1]?.trim() ?? null }
 

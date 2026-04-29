@@ -40,7 +40,7 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai.types import Content, Part
 
-from meetingmind.agent import root_agent
+from meetingmind.agent import root_agent, _STATE_DEFAULTS
 from meetingmind.tools.db_tools import (
     get_pending_tasks,
     list_all_meetings,
@@ -213,8 +213,10 @@ def _clean_response(text: str) -> str:
     # 2. Strip all fenced code blocks (```json ... ```) anywhere in the text
     text = _re.sub(r"```[\w]*\n.*?```", "", text, flags=_re.DOTALL)
 
-    # 3. Strip multi-line JSON objects/arrays anywhere in the text
-    text = _re.sub(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", "", text, flags=_re.DOTALL)
+    # 3. Strip raw JSON objects that appear on their OWN line (agent internal chatter).
+    # Only match lines where the ENTIRE line is a JSON object — never strip inline braces
+    # that are part of markdown text like "Tasks saved {3}" or calendar event details.
+    text = _re.sub(r"^\s*\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}\s*$", "", text, flags=_re.MULTILINE)
 
     # 4. Strip leftover lines that are pure JSON fragments, bare "json", or stray tool-call text
     lines = text.splitlines()
@@ -236,6 +238,8 @@ def _clean_response(text: str) -> str:
         if _re.match(r"^save_quality_score\s*\(", stripped):
             continue
         if _re.match(r"^save_tasks\s*\(", stripped):
+            continue
+        if stripped == "Quality evaluation saved.":
             continue
         clean.append(line)
 
@@ -261,6 +265,7 @@ async def chat(req: ChatRequest):
             app_name="meetingmind",
             user_id=user_id,
             session_id=session_id,
+            state={**_STATE_DEFAULTS},  # pre-init so {final_briefing} etc never throw
         )
         if asyncio.iscoroutine(coro):
             await coro
@@ -337,6 +342,7 @@ async def chat(req: ChatRequest):
                             response_text_ref[0] = ""
                             raise RuntimeError("429 in response content")
 
+                        final_session_id_ref[0] = attempt_session_id
                         return  # genuine success — stop trying further models
 
                     except Exception as exc:
@@ -401,6 +407,8 @@ async def chat(req: ChatRequest):
                 # fail open — continue with full pipeline
 
         response_text_ref = [""]
+        # Tracks which session the pipeline actually ran in (may differ on 429 fallback)
+        final_session_id_ref = [session_id]
         agent_task = asyncio.create_task(run_agent())
 
         # Heartbeat every 3 s; also emit pipeline stage events for transcripts
@@ -432,6 +440,103 @@ async def chat(req: ChatRequest):
         else:
             raw = response_text_ref[0]
             logger.info(f"Raw agent response (first 300 chars): {raw[:300]!r}")
+
+            # ── For transcripts: always use final_briefing from session state ──
+            # notes_agent writes the briefing to state via assemble_briefing_from_state().
+            # This is more reliable than root_agent relaying it, because the
+            # ParallelAgent race condition can cause root_agent to relay
+            # evaluation_agent's "Quality evaluation saved." instead.
+            if is_transcript:
+                try:
+                    sess = _session_service.get_session(
+                        app_name="meetingmind",
+                        user_id=user_id,
+                        session_id=final_session_id_ref[0],
+                    )
+                    if asyncio.iscoroutine(sess):
+                        sess = await sess
+                    st = getattr(sess, "state", None) or {}
+                    state_briefing = st.get("final_briefing", "")
+
+                    # Only use state briefing if summary section has actual content
+                    import re as _bre
+                    _summary_match = _bre.search(r'📋 Summary:\n(.+)', state_briefing or '')
+                    _has_content = bool(_summary_match and _summary_match.group(1).strip())
+                    if state_briefing and "✅" in state_briefing and _has_content:
+                        raw = state_briefing
+                        logger.info("Briefing read from session state (authoritative source)")
+                    elif state_briefing and "✅" not in state_briefing and state_briefing.strip():
+                        raw = state_briefing
+                        logger.info("Briefing read from session state (no ✅ marker)")
+                    else:
+                        # Last resort: build briefing from state variables,
+                        # falling back to DB if state is empty.
+                        summary = (st.get("meeting_summary") or "").strip()
+                        tasks = (st.get("prioritized_tasks") or "").strip()
+                        save_result = (st.get("save_schedule_result") or "").strip()
+
+                        # If state is empty (analysis_agent didn't write), pull from DB
+                        if not summary or not tasks:
+                            try:
+                                import psycopg2 as _pg_lr
+                                with _pg_lr.connect(
+                                    host=os.getenv("DB_HOST"),
+                                    dbname=os.getenv("DB_NAME"),
+                                    user=os.getenv("DB_USER"),
+                                    password=os.getenv("DB_PASSWORD"),
+                                    port=int(os.getenv("DB_PORT", 5432)),
+                                ) as _conn_lr:
+                                    _cur = _conn_lr.cursor()
+                                    # Skip meetings with empty summary — they came from failed runs
+                                    _cur.execute(
+                                        "SELECT id, summary FROM meetings "
+                                        "WHERE summary IS NOT NULL AND summary != '' "
+                                        "ORDER BY created_at DESC LIMIT 1"
+                                    )
+                                    _row = _cur.fetchone()
+                                    if _row and _row[1]:
+                                        summary = summary or _row[1]
+                                        _mid = str(_row[0])
+                                        logger.info(f"DB fallback: found meeting {_mid} with {len(summary)} char summary")
+                                        if not tasks:
+                                            _cur.execute(
+                                                "SELECT task_name, priority, owner, deadline "
+                                                "FROM tasks WHERE meeting_id = %s ORDER BY created_at",
+                                                (_mid,),
+                                            )
+                                            _trows = _cur.fetchall()
+                                            if _trows:
+                                                tasks = "\n".join(
+                                                    f"• {t[1]} — {t[0]} — Owner: {t[2] or 'Unassigned'} — Due: {t[3] or 'TBD'}"
+                                                    for t in _trows
+                                                )
+                                                logger.info(f"DB fallback: loaded {len(_trows)} tasks")
+                                    else:
+                                        logger.warning("DB fallback: no meeting with non-empty summary found")
+                                    _cur.close()
+                            except Exception as _db_lr_err:
+                                logger.warning(f"DB fallback for briefing failed: {_db_lr_err}")
+
+                        if summary:
+                            raw = (
+                                "✅ Meeting Processed Successfully\n\n"
+                                "📋 Summary:\n" + summary + "\n\n"
+                                "✅ Action Items:\n" + tasks + "\n\n"
+                                "💾 System Actions:\n" + save_result + "\n"
+                                "📝 Notes saved to knowledge base\n\n"
+                                "📊 Pipeline: 4 stages · Tasks + Calendar + Notes + Quality Eval\n\n"
+                                '✨ Try: "What tasks are pending?" · "Mark [task] as done"'
+                            )
+                            logger.info("Briefing built from last-resort recovery")
+                        else:
+                            logger.warning(
+                                f"All briefing recovery methods failed "
+                                f"(session={final_session_id_ref[0]}, raw={raw[:120]!r})"
+                            )
+                except Exception as sb_err:
+                    logger.warning(
+                        f"State briefing read failed (non-fatal): {sb_err}"
+                    )
 
             # Create Google Doc directly (no LLM involved) after a transcript pipeline run
             if is_transcript:

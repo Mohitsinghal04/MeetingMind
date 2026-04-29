@@ -208,11 +208,13 @@ def assemble_briefing_from_state(tool_context: ToolContext) -> str:
 
     Reads meeting_summary, prioritized_tasks, and save_schedule_result that the
     earlier pipeline stages wrote to state, then renders a clean markdown briefing.
+    Falls back to DB if state variables are empty (handles ADK state propagation edge cases).
     Calling this tool eliminates the briefing_agent LLM call entirely.
 
     Returns:
-        Formatted markdown string starting with ✅ **Meeting Processed Successfully**.
+        Formatted markdown string starting with ✅ Meeting Processed Successfully.
     """
+    import os as _os
     state = tool_context.state
     summary = (state.get("meeting_summary") or "").strip()
     tasks = (state.get("prioritized_tasks") or "").strip()
@@ -221,19 +223,57 @@ def assemble_briefing_from_state(tool_context: ToolContext) -> str:
         state.get("save_schedule_result") or state.get("SAVE_SCHEDULE_RESULT") or ""
     ).strip()
 
+    # DB fallback — if state is empty (analysis_agent may not have written to state
+    # due to ADK state propagation quirks), pull summary + tasks from the latest meeting.
+    if not summary or not tasks:
+        try:
+            import psycopg2 as _pg
+            with _pg.connect(
+                host=_os.getenv("DB_HOST"),
+                dbname=_os.getenv("DB_NAME"),
+                user=_os.getenv("DB_USER"),
+                password=_os.getenv("DB_PASSWORD"),
+                port=int(_os.getenv("DB_PORT", 5432)),
+            ) as _conn:
+                _cur = _conn.cursor()
+                _cur.execute("SELECT id, summary FROM meetings ORDER BY created_at DESC LIMIT 1")
+                _row = _cur.fetchone()
+                if _row and _row[1]:
+                    if not summary:
+                        summary = _row[1]
+                        logging.info("assemble_briefing: summary loaded from DB (state was empty)")
+                    if not tasks:
+                        _mid = str(_row[0])
+                        _cur.execute(
+                            "SELECT task_name, priority, owner, deadline "
+                            "FROM tasks WHERE meeting_id = %s ORDER BY created_at",
+                            (_mid,),
+                        )
+                        _trows = _cur.fetchall()
+                        if _trows:
+                            tasks = "\n".join(
+                                f"• {t[1]} — {t[0]} — Owner: {t[2] or 'Unassigned'} — Due: {t[3] or 'TBD'}"
+                                for t in _trows
+                            )
+                            logging.info(f"assemble_briefing: {len(_trows)} tasks loaded from DB (state was empty)")
+                _cur.close()
+        except Exception as _db_err:
+            logging.warning(f"assemble_briefing DB fallback failed (non-fatal): {_db_err}")
+
     briefing = (
-        "✅ **Meeting Processed Successfully**\n\n"
-        "📋 **Summary:**\n"
+        "✅ Meeting Processed Successfully\n\n"
+        "📋 Summary:\n"
         f"{summary}\n\n"
-        "✅ **Action Items:**\n"
+        "✅ Action Items:\n"
         f"{tasks}\n\n"
-        "💾 **System Actions:**\n"
+        "💾 System Actions:\n"
         f"{save_result}\n"
         "📝 Notes saved to knowledge base\n\n"
-        "📊 **Pipeline:** 3 stages · Notes ∥ Quality Eval · Tasks + Calendar + Google Workspace MCP\n\n"
-        '✨ **Try:** "What tasks are pending?" · "Create a doc for this meeting" · "Mark [task] as done"'
+        "📊 Pipeline: 4 stages · Tasks + Calendar + Notes + Quality Eval\n\n"
+        '✨ Try: "What tasks are pending?" · "Create a doc for this meeting" · "Mark [task] as done"'
     )
     tool_context.state["final_briefing"] = briefing
+    logging.info(f"assemble_briefing: briefing built (summary={len(summary)} chars, tasks={len(tasks)} chars)")
     return briefing
 
 
@@ -441,7 +481,9 @@ Output ONLY the return value of that call verbatim — no other text, no JSON, n
 The returned text starts with ✅ **Meeting Processed Successfully** — relay it exactly as-is.
 """,
     tools=[save_meeting_note, assemble_briefing_from_state],
-    output_key="final_briefing",
+    # No output_key — assemble_briefing_from_state() writes directly to state["final_briefing"].
+    # Using output_key here would overwrite that with the LLM's text response, which flash-lite
+    # sometimes leaves empty, erasing the correctly assembled briefing.
 )
 
 memory_agent_background = Agent(
@@ -495,27 +537,24 @@ MEETING SUMMARY:
 PRIORITIZED TASKS:
 {prioritized_tasks}
 
-MEETING ID: {current_meeting_id}
-
 Score each dimension 1–5 (5 = excellent):
 - summary_quality: Does the summary capture all key decisions, owners, and outcomes?
 - task_extraction_completeness: Were all action items from the transcript captured?
 - priority_accuracy: Are High/Medium/Low priorities correctly assigned relative to impact?
 - owner_attribution: Are tasks assigned to the correct named owners from the transcript?
 
-YOUR ONLY JOB: Call save_quality_score exactly once with these parameters:
-- meeting_id: the MEETING ID shown above (copy it exactly)
-- scores: a dict containing your integer/float scores, e.g.
-  {
-    "summary_quality": 4,
-    "task_extraction_completeness": 5,
-    "priority_accuracy": 4,
-    "owner_attribution": 5,
-    "overall_score": 4.5,
-    "flags": ["any specific issues found, or empty list"],
-    "recommendations": ["one concrete improvement, or empty list"]
-  }
+YOUR ONLY JOB: Call save_quality_score exactly once with just the scores dict:
+save_quality_score(scores={
+  "summary_quality": <int 1-5>,
+  "task_extraction_completeness": <int 1-5>,
+  "priority_accuracy": <int 1-5>,
+  "owner_attribution": <int 1-5>,
+  "overall_score": <float 1.0-5.0>,
+  "flags": ["any specific issues, or empty list"],
+  "recommendations": ["one concrete improvement, or empty list"]
+})
 
+Do NOT pass meeting_id — the function reads it automatically from session state.
 Do NOT output any JSON text. Do NOT use print(). Just call save_quality_score as a tool.
 After the tool call succeeds, output only: "Quality evaluation saved."
 """,
@@ -526,34 +565,14 @@ After the tool call succeeds, output only: "Quality evaluation saved."
 briefing_agent = Agent(
     name="briefing_agent",
     model=model_name,
-    description="Assembles all agent outputs into a clean markdown briefing and creates a Google Doc.",
+    description="Final pipeline stage: calls assemble_briefing_from_state() and outputs the result. Always runs after parallel agents — eliminates race condition.",
     instruction="""
-You are the final agent in a meeting processing pipeline. Write a clean executive briefing.
-
-Use the session state: meeting_summary, prioritized_tasks, SAVE_SCHEDULE_RESULT.
-
-Output ONLY this format, starting with ✅ on the very first line:
-
-✅ **Meeting Processed Successfully**
-
-📋 **Summary:**
-[the meeting summary]
-
-✅ **Action Items:**
-[one bullet per task: • **High/Medium/Low** — task name — Owner: name — Due: date]
-
-💾 **System Actions:**
-[tasks saved count and duplicates skipped from SAVE_SCHEDULE_RESULT]
-• Notes saved to knowledge base
-
-📊 **Pipeline:** 4 agents · Tasks + Calendar + Notes + Google Workspace MCP
-
----
-✨ **Try:** "What tasks are pending?" · "Create a doc for this meeting" · "Mark [task] as done"
-
-Rules: no JSON, no code blocks. Output must start with ✅ **Meeting Processed Successfully**.
+You are the FINAL step in the meeting processing pipeline.
+Your only job: call assemble_briefing_from_state() and output the return value EXACTLY as-is.
+Do NOT add any text before or after it. Do NOT reformat it. Do NOT wrap in code blocks.
+Just call the tool and relay its output verbatim.
 """,
-    tools=[],
+    tools=[assemble_briefing_from_state],
     output_key="final_briefing",
 )
 
@@ -1059,19 +1078,14 @@ Keep it simple and conversational.
 # - notes_agent:      save note → assemble briefing (Python tools) → ~3s
 # - evaluation_agent: LLM-as-Judge on gemini-2.5-flash-lite (separate quota) → ~5s
 # Different models = separate Vertex AI quota buckets → no 429 collision
-parallel_notes_eval = ParallelAgent(
-    name="parallel_notes_eval",
-    description="Runs notes saving + LLM-as-Judge quality evaluation simultaneously.",
-    sub_agents=[notes_agent, evaluation_agent],
-)
-
 transcript_pipeline = SequentialAgent(
     name="transcript_pipeline",
-    description="3-stage pipeline: analysis → save+schedule → (notes ∥ evaluation)",
+    description="4-stage pipeline: analysis → save+schedule → evaluation → notes",
     sub_agents=[
-        analysis_agent,  # LLM call 1: summarise + extract tasks + save meeting to DB
-        save_and_schedule_agent,  # LLM call 2: save tasks to DB + create calendar events
-        parallel_notes_eval,  # LLM call 3a (notes/flash) ∥ 3b (eval/flash-lite) — parallel
+        analysis_agent,           # Stage 1: summarise + extract tasks + save meeting to DB
+        save_and_schedule_agent,  # Stage 2: save tasks to DB + create calendar events
+        evaluation_agent,         # Stage 3: LLM-as-Judge quality score
+        notes_agent,              # Stage 4: save note + write final_briefing to state (LAST)
     ],
 )
 
@@ -1220,7 +1234,7 @@ I'm an AI productivity assistant powered by **8 specialized agents** and **4 MCP
         set_user_query,
         set_user_command,
         set_memory_input,
-        store_memory_direct,  # handles INTENT D inline — no extra LLM call
+        store_memory_direct,   # handles INTENT D inline — no extra LLM call
     ],
     sub_agents=[
         transcript_pipeline,

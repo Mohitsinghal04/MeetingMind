@@ -1074,19 +1074,44 @@ def semantic_search_memory(tool_context: ToolContext, query_text: str, limit: in
         return get_memory(tool_context)
 
 
-def save_quality_score(tool_context: ToolContext, meeting_id: str, scores: dict) -> dict:
+def save_quality_score(tool_context: ToolContext, scores: dict, meeting_id: Optional[str] = None) -> dict:
     """Persist LLM-as-Judge quality scores for a meeting processing run.
 
     Args:
         tool_context: ADK tool context.
-        meeting_id: UUID of the processed meeting.
         scores: Dict from evaluation_agent with keys: summary_quality,
                 task_extraction_completeness, priority_accuracy, owner_attribution,
                 overall_score, flags, recommendations.
+        meeting_id: Optional UUID override. If absent or invalid, the function reads
+                    current_meeting_id from session state (safeguard against LLM hallucination).
 
     Returns:
         dict with status and score_id.
     """
+    # 1. Prefer session state — prevents LLM from passing hallucinated/placeholder UUIDs
+    state_meeting_id = tool_context.state.get("current_meeting_id")
+    if state_meeting_id and str(state_meeting_id) not in ("None", "null", ""):
+        meeting_id = str(state_meeting_id)
+        logging.info(f"save_quality_score: meeting_id from state: {meeting_id}")
+    elif meeting_id and meeting_id not in ("None", "null", "", "a1b2c3d4-e5f6-7890-1234-567890abcdef"):
+        logging.info(f"save_quality_score: meeting_id from parameter: {meeting_id}")
+    else:
+        # 2. DB fallback — state may be empty if state propagation failed between sequential agents
+        try:
+            with get_db_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT id FROM meetings ORDER BY created_at DESC LIMIT 1")
+                row = cur.fetchone()
+                cur.close()
+            if row:
+                meeting_id = str(row[0])
+                logging.info(f"save_quality_score: using latest meeting from DB: {meeting_id}")
+            else:
+                logging.warning("save_quality_score: no meetings in DB — skipping quality save")
+                return {"status": "skipped", "reason": "no meetings found in DB"}
+        except Exception as db_err:
+            logging.warning(f"save_quality_score: DB fallback failed: {db_err}")
+            return {"status": "skipped", "reason": f"meeting_id unavailable: {db_err}"}
     try:
         import json as _json
 
